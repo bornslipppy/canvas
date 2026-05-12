@@ -199,9 +199,18 @@ export function useFigmaZoom(containerRef, options = {}) {
       e.preventDefault();
 
       const now = performance.now();
-      const rect = container.getBoundingClientRect();
-      const pivotX = e.clientX - rect.left;
-      const pivotY = e.clientY - rect.top;
+      // CRITICAL: pivot must be in the WRAPPER's coordinate space, NOT the
+      // transformed inner div's space. The inner 10000x10000 div is INSIDE the
+      // transformed .react-transform-component, so its getBoundingClientRect()
+      // returns transformed coordinates — using that for pivot makes the
+      // cursor-anchor math read world-space coords as if they were
+      // viewport-relative, throwing the camera by hundreds of pixels per event.
+      // The .react-transform-wrapper is the static, untransformed parent and is
+      // the correct reference for setTransform's coordinate space.
+      const wrapper = container.closest('.react-transform-wrapper') ?? container;
+      const wRect = wrapper.getBoundingClientRect();
+      const pivotX = e.clientX - wRect.left;
+      const pivotY = e.clientY - wRect.top;
 
       // === CLASSIFY ===
       // Synthetic ctrlKey from trackpad pinch, or real Ctrl/Meta from mouse wheel = ZOOM.
