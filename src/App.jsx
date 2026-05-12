@@ -212,8 +212,19 @@ export default function App() {
 
   const handleAddFrame = (e) => {
     e.preventDefault()
-    if (!newUrl) return
-    setFrames([...frames, { id: `f-${Date.now()}`, url: newUrl, title: `Frame ${frames.length + 1}` }])
+    const trimmed = newUrl.trim()
+    if (!trimmed) return
+
+    // Normalize: add http:// if no scheme is present.
+    // Match scheme like http://, https://, file://, etc.
+    const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)
+    const url = hasScheme ? trimmed : `http://${trimmed}`
+
+    // Functional update — uses the latest state, not the closure's snapshot.
+    setFrames((prev) => [
+      ...prev,
+      { id: `f-${Date.now()}`, url, title: `Frame ${prev.length + 1}` },
+    ])
     setNewUrl('')
   }
 
@@ -247,7 +258,10 @@ export default function App() {
 
           <form onSubmit={handleAddFrame} className="flex flex-1 min-w-[200px] gap-2">
             <Input
-              type="url"
+              type="text"
+              inputMode="url"
+              autoComplete="off"
+              spellCheck={false}
               placeholder="Paste prototype URL here..."
               value={newUrl}
               onChange={(e) => setNewUrl(e.target.value)}
