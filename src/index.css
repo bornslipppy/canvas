@@ -128,4 +128,15 @@
   body {
     @apply bg-background text-foreground;
   }
+
+  /*
+   * react-zoom-pan-pinch applies its own cursor (grab) to its wrapper/component
+   * elements regardless of whether panning is enabled. We want our root-level
+   * cursor (figma arrow / pan grab / crosshair) to be authoritative, so force
+   * the library's elements to inherit from the parent instead.
+   */
+  .react-transform-wrapper,
+  .react-transform-component {
+    cursor: inherit !important;
+  }
 }
