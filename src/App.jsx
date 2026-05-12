@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import { TransformWrapper, TransformComponent, useControls } from 'react-zoom-pan-pinch'
 
 // Import Shadcn Components
@@ -9,7 +9,28 @@ import { Card } from "@/components/ui/card"
 // Custom zoom pipeline
 import { useFigmaZoom } from '@/hooks/useFigmaZoom'
 
-const PrototypeFrame = ({ id, title, src, x, y, isDragging, onDragStart, width = '1280px', height = '720px' }) => {
+const FRAME_W = 1280
+const FRAME_H = 720
+const FRAME_TOTAL_H = 750  // body + title gap
+
+/**
+ * Each prototype frame is absolutely positioned in canvas world space.
+ *
+ * Z-ordering (matters for drag-from-title to work in REGULAR mode where the
+ * shield is up at z-9998):
+ *   - Title (h3): absolute, z-9999 → ALWAYS above the shield.
+ *   - Iframe body: relative, z-auto normally, z-1 while dragging → above other
+ *     frames while you're moving it, but still below the shield so clicks
+ *     are blocked in regular mode the same as any other frame.
+ *
+ * The outer wrapper does NOT have a z-index, so it doesn't create its own
+ * stacking context and the title's z-9999 lives in the global stacking
+ * context (where the shield's z-9998 also lives).
+ *
+ * Memoized so an unrelated parent re-render doesn't re-render every frame —
+ * critical for smooth drags, since the drag itself bypasses React state.
+ */
+const PrototypeFrame = memo(({ id, title, src, x, y, isDragging, onDragStart, width = '1280px', height = '720px' }) => {
   const [pins, setPins] = useState([])
 
   useEffect(() => {
@@ -28,19 +49,25 @@ const PrototypeFrame = ({ id, title, src, x, y, isDragging, onDragStart, width =
 
   return (
     <div
-      className="absolute flex flex-col gap-3"
+      className="absolute"
       style={{ left: x, top: y }}
+      data-frame-id={id}
     >
+      {/*
+        Title sits above the iframe (top: -28) and above the shield (z-9999).
+        Drag handle. The select-none + cursor changes make it feel like Figma.
+      */}
       <h3
         onMouseDown={(e) => onDragStart(e, id)}
-        className={`text-[12px] font-bold text-slate-500 ml-1 tracking-widest uppercase select-none ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
+        className={`text-[12px] font-bold text-slate-500 tracking-widest uppercase select-none ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
+        style={{ position: 'absolute', top: -28, left: 4, zIndex: 9999 }}
         title="Drag to move this frame"
       >
         {title}
       </h3>
       <div
         className="relative shadow-2xl rounded-xl overflow-hidden border border-slate-200 bg-white"
-        style={{ width, height }}
+        style={{ width, height, zIndex: isDragging ? 1 : 'auto' }}
       >
         <iframe src={src} className="w-full h-full border-none z-10" title={title} />
         {pins.map((pin) => (
@@ -55,7 +82,8 @@ const PrototypeFrame = ({ id, title, src, x, y, isDragging, onDragStart, width =
       </div>
     </div>
   )
-}
+})
+PrototypeFrame.displayName = 'PrototypeFrame'
 
 /**
  * CanvasContent is rendered INSIDE <TransformWrapper> so it can access
@@ -128,15 +156,14 @@ const CanvasContent = ({ frames, onRailHit, onGestureStateChange, registerContro
 }
 
 export default function App() {
-  // Frame world-space coords: top-left of the title+frame wrapper. Canvas is
-  // 10000x10000 with origin (0,0) at top-left, so center is (5000, 5000).
-  // FRAME_W = 1280, FRAME_H ≈ 750 (frame body + title + gap).
+  // Frame world-space coords: top-left of the iframe body in canvas world space.
+  // Canvas is 10000x10000 with origin (0,0) at top-left, so center is (5000, 5000).
   const [frames, setFrames] = useState([{
     id: 'f1',
     url: 'http://localhost:5174',
     title: 'Desktop View',
-    x: 5000 - 1280 / 2,
-    y: 5000 - 750 / 2,
+    x: 5000 - FRAME_W / 2,
+    y: 5000 - FRAME_TOTAL_H / 2,
   }])
   const [newUrl, setNewUrl] = useState('')
   const [isSpacePressed, setIsSpacePressed] = useState(false)
@@ -144,16 +171,17 @@ export default function App() {
 
   // Shield composition. Two competing forces:
   //   clickthroughIntent (user wants iframe events): Shift held OR Interact mode on
-  //   canvasOverride     (canvas wins regardless):   gesture active OR Cmd/Ctrl held
+  //   canvasOverride     (canvas wins regardless):   gesture active, OR Cmd/Ctrl held
+  //                                                  (zoom intent), OR Space held
+  //                                                  (pan intent — must raise the
+  //                                                  shield so library mousedown fires)
   // Shield is up unless clickthrough wins. canvasOverride trumps clickthrough.
-  // The Cmd/Ctrl override is what makes "pinch zoom over iframe in Interact mode" work:
-  // hold Cmd, shield raises, wheel reaches our hook, pinch zooms.
   const [isShiftPressed, setIsShiftPressed] = useState(false)
   const [isGestureActive, setIsGestureActive] = useState(false)
   const [isInteractMode, setIsInteractMode] = useState(false)
   const [isZoomModifierPressed, setIsZoomModifierPressed] = useState(false)
   const clickthroughIntent = isShiftPressed || isInteractMode
-  const canvasOverride = isGestureActive || isZoomModifierPressed
+  const canvasOverride = isGestureActive || isZoomModifierPressed || isSpacePressed
   const shieldActive = !clickthroughIntent || canvasOverride
 
   // Frame drag state: null when no drag in progress, otherwise carries the frame
@@ -169,6 +197,10 @@ export default function App() {
   const controlsRef = useRef(null)
   const registerControls = useCallback((c) => { controlsRef.current = c }, [])
 
+  // Ref to the root div — used to programmatically refocus the parent doc
+  // after the user has interacted with an iframe (see handleMouseDown below).
+  const rootRef = useRef(null)
+
   const handleRailHit = useCallback((rail) => {
     setBumpAxis(rail)
     if (bumpTimerRef.current) clearTimeout(bumpTimerRef.current)
@@ -177,6 +209,31 @@ export default function App() {
 
   const handleGestureStateChange = useCallback((active) => {
     setIsGestureActive(active)
+  }, [])
+
+  // Zoom buttons — anchored at viewport center, so they work even when the
+  // cursor is over an iframe (where pinch is blocked by the browser). This is
+  // the keyboard-free alternative to "hold Cmd and pinch" for Interact mode.
+  const zoomBy = useCallback((factor) => {
+    const c = controlsRef.current
+    if (!c) return
+    const componentEl = document.querySelector('.react-transform-component')
+    const t = componentEl?.style?.transform ?? ''
+    const m = t.match(/translate\(([^,]+)px,\s*([^)]+)px\)\s*scale\(([^)]+)\)/)
+    if (!m) return
+    const camX = parseFloat(m[1])
+    const camY = parseFloat(m[2])
+    const oldScale = parseFloat(m[3])
+    const newScale = Math.min(20, Math.max(0.01, oldScale * factor))
+    // Anchor zoom on viewport center so the visual center stays put.
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const px = vw / 2
+    const py = vh / 2
+    const ratio = newScale / oldScale
+    const newX = px - (px - camX) * ratio
+    const newY = py - (py - camY) * ratio
+    c.setTransform(newX, newY, newScale, 200)
   }, [])
 
   const figmaCursor = `url("data:image/svg+xml,%3Csvg width='24' height='24' viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M7 4.5L7 18.5L11 14.5L17 14.5L7 4.5Z' fill='black' stroke='white' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E"), auto`
@@ -268,6 +325,28 @@ export default function App() {
       setIsZoomModifierPressed((prev) => (prev === modActive ? prev : modActive))
     }
 
+    // FIX FOR INTERACT MODE KEYBOARD LOCKOUT:
+    // When the user clicks inside a cross-origin iframe, focus moves into that
+    // iframe's document. From then on, keydown events (including Space) fire
+    // inside the iframe — our parent window listener never sees them. So Space
+    // pan stops working after the user has interacted with a prototype.
+    //
+    // This handler runs on every mousedown over the parent doc. If the click
+    // target is NOT an iframe (so the user just clicked the canvas, a title,
+    // or the toolbar), we blur whatever iframe currently holds focus and
+    // refocus our root element. Subsequent key events flow back to the parent.
+    //
+    // We deliberately do NOT run this when the click target IS an iframe —
+    // that click is the user intentionally interacting with the prototype.
+    const handleMouseDown = (e) => {
+      if (e.target.tagName === 'IFRAME') return
+      const active = document.activeElement
+      if (active && active.tagName === 'IFRAME') {
+        active.blur()
+        rootRef.current?.focus()
+      }
+    }
+
     // Defensive: if the window loses focus mid-gesture (alt-tab, etc.), clear
     // transient modifier state so the shield/cursor don't get stuck. Interact
     // mode is sticky and intentionally preserved across blur.
@@ -281,24 +360,31 @@ export default function App() {
     window.addEventListener('keydown', handleDown)
     window.addEventListener('keyup', handleUp)
     window.addEventListener('mousemove', handleMouseMove, { passive: true })
+    window.addEventListener('mousedown', handleMouseDown, { capture: true })
     window.addEventListener('blur', handleBlur)
     return () => {
       window.removeEventListener('wheel', preventBrowserZoom)
       window.removeEventListener('keydown', handleDown)
       window.removeEventListener('keyup', handleUp)
       window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mousedown', handleMouseDown, { capture: true })
       window.removeEventListener('blur', handleBlur)
       if (bumpTimerRef.current) clearTimeout(bumpTimerRef.current)
     }
   }, [])
 
   // ---------------- Frame dragging ----------------
-  // Drag a frame by its title. The math is OFFSET-BASED in world space:
-  // at drag start, capture the world-space offset from cursor to frame.
-  // On every rAF tick, place the frame at (worldCursor + offset). This means
-  // the frame stays exactly under the cursor regardless of camera pan or
-  // zoom changes that happen during the drag — including the edge-pan that
-  // we run automatically when the cursor reaches the viewport edge.
+  // The drag math is OFFSET-BASED in world space: at drag start we capture
+  // the world-space offset from cursor to frame. On every rAF tick we place
+  // the frame at (worldCursor + offset).
+  //
+  // CRITICAL: during the drag we update the frame's DOM position imperatively
+  // (style.left / style.top) instead of going through React state. Reasons:
+  //   - setFrames every tick was triggering a re-render of every PrototypeFrame
+  //     (~16ms of React work per frame on top of the actual drag), which
+  //     looked like glitchy stuttering — the symptom the user reported.
+  //   - The dragged frame's React state is intentionally stale during the
+  //     drag. We commit the final position to state once, on mouseup.
 
   const handleFrameDragStart = (e, frameId) => {
     e.preventDefault()
@@ -324,6 +410,8 @@ export default function App() {
     const cursorWY = (e.clientY - wRect.top - camY) / scale
     setDragState({
       frameId,
+      frameStartX: frame.x,
+      frameStartY: frame.y,
       dxOffset: frame.x - cursorWX,
       dyOffset: frame.y - cursorWY,
       initialClientX: e.clientX,
@@ -334,18 +422,27 @@ export default function App() {
   // Drag rAF loop. Three responsibilities, all on the same tick to stay in sync:
   //   1. Read cursor + current camera
   //   2. If cursor is near a viewport edge, pan the camera in that direction
-  //   3. Place the dragged frame at (worldCursor + offset)
+  //   3. Place the dragged frame at (worldCursor + offset) — IMPERATIVELY
   useEffect(() => {
     if (!dragState) return
 
     const EDGE_THRESHOLD = 60       // px from viewport edge where pan kicks in
     const MAX_EDGE_PAN_SPEED = 1200 // viewport px/sec at the edge itself
+
+    // Find the dragged frame's DOM element ONCE. We'll mutate its style
+    // directly each tick without going through React.
+    const frameEl = document.querySelector(`[data-frame-id="${CSS.escape(dragState.frameId)}"]`)
+    if (!frameEl) return
+
     const cursorRef = { current: { x: dragState.initialClientX, y: dragState.initialClientY } }
     const wrapperEl = document.querySelector('.react-transform-wrapper')
     const componentEl = document.querySelector('.react-transform-component')
     const wRect = wrapperEl?.getBoundingClientRect() ?? { left: 0, top: 0 }
     let rafId = null
     let lastT = performance.now()
+    // Tracks the most recent imperative position so we can commit it on drop.
+    let finalX = dragState.frameStartX
+    let finalY = dragState.frameStartY
 
     const readCamera = () => {
       const t = componentEl?.style?.transform ?? ''
@@ -365,7 +462,7 @@ export default function App() {
       const vw = window.innerWidth
       const vh = window.innerHeight
 
-      // Linear edge-pan velocity: 0 at threshold, MAX at viewport edge.
+      // Linear edge-pan velocity: 0 at threshold, MAX at the viewport edge.
       // setTransform's x/y mean "translate the canvas by this much in viewport
       // space" — to pan VIEW right (reveal more of the right side of the
       // world), we move the canvas LEFT, which is a negative x delta.
@@ -392,16 +489,14 @@ export default function App() {
 
       // Place the frame at (worldCursor + offset). Re-read camera AFTER the
       // possible pan above so the frame and camera stay perfectly in sync.
-      const camNow = vxView || vyView ? readCamera() : cam
-      const wx = (cx - wRect.left - camNow.x) / camNow.scale
-      const wy = (cy - wRect.top - camNow.y) / camNow.scale
-      setFrames((prev) =>
-        prev.map((f) =>
-          f.id === dragState.frameId
-            ? { ...f, x: wx + dragState.dxOffset, y: wy + dragState.dyOffset }
-            : f
-        )
-      )
+      const camNow = (vxView || vyView) ? readCamera() : cam
+      const wx = (cx - wRect.left - camNow.x) / camNow.scale + dragState.dxOffset
+      const wy = (cy - wRect.top - camNow.y) / camNow.scale + dragState.dyOffset
+      // IMPERATIVE update — bypasses React entirely.
+      frameEl.style.left = `${wx}px`
+      frameEl.style.top = `${wy}px`
+      finalX = wx
+      finalY = wy
 
       rafId = requestAnimationFrame(tick)
     }
@@ -409,7 +504,14 @@ export default function App() {
     const handleMove = (e) => {
       cursorRef.current = { x: e.clientX, y: e.clientY }
     }
-    const handleUp = () => setDragState(null)
+    const handleUp = () => {
+      // Commit the final position to React state. This causes ONE re-render of
+      // PrototypeFrame which catches up with the imperative DOM state.
+      setFrames((prev) =>
+        prev.map((f) => (f.id === dragState.frameId ? { ...f, x: finalX, y: finalY } : f))
+      )
+      setDragState(null)
+    }
 
     window.addEventListener('mousemove', handleMove)
     window.addEventListener('mouseup', handleUp)
@@ -431,13 +533,11 @@ export default function App() {
 
     setFrames((prev) => {
       // Place the new frame to the right of the rightmost existing one.
-      const FRAME_W = 1280
-      const FRAME_H = 750
       const GAP = 128
       const rightmostRight =
         prev.length > 0 ? Math.max(...prev.map((f) => f.x + FRAME_W)) : 5000 - FRAME_W / 2
       const newX = prev.length > 0 ? rightmostRight + GAP : 5000 - FRAME_W / 2
-      const newY = prev.length > 0 ? prev[0].y : 5000 - FRAME_H / 2
+      const newY = prev.length > 0 ? prev[0].y : 5000 - FRAME_TOTAL_H / 2
 
       const next = [
         ...prev,
@@ -448,7 +548,7 @@ export default function App() {
         const c = controlsRef.current
         if (!c) return
         const frameCenterX = newX + FRAME_W / 2
-        const frameCenterY = newY + FRAME_H / 2
+        const frameCenterY = newY + FRAME_TOTAL_H / 2
         const scale = 0.5
         const vw = window.innerWidth
         const vh = window.innerHeight
@@ -484,7 +584,9 @@ export default function App() {
 
   return (
     <div
-      className="relative w-full h-screen bg-slate-50 overflow-hidden"
+      ref={rootRef}
+      tabIndex={-1}
+      className="relative w-full h-screen bg-slate-50 overflow-hidden outline-none"
       style={{ cursor }}
     >
       {/* FLOATING TOOLBAR — single horizontal strip (Card defaults are flex-col + py-4; override here) */}
@@ -517,6 +619,27 @@ export default function App() {
 
           <div className="border-l border-slate-100 pl-3 flex items-center gap-2 shrink-0 whitespace-nowrap">
             {/*
+              Zoom buttons. Useful in Interact mode where pinching over an
+              iframe is captured by the iframe — these always work because
+              they're toolbar clicks, never wheel events.
+            */}
+            <button
+              type="button"
+              onClick={() => zoomBy(1 / 1.2)}
+              title="Zoom out"
+              className="h-7 w-7 rounded-md text-sm font-bold bg-slate-100 text-slate-600 hover:bg-slate-200 transition-colors shrink-0"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              onClick={() => zoomBy(1.2)}
+              title="Zoom in"
+              className="h-7 w-7 rounded-md text-sm font-bold bg-slate-100 text-slate-600 hover:bg-slate-200 transition-colors shrink-0"
+            >
+              +
+            </button>
+            {/*
               Interact toggle. Discoverable equivalent of the 'I' hotkey.
               When active: amber fill, the shield is down, iframes are click-through.
               When inactive: slim outline button, default canvas-navigation behavior.
@@ -524,7 +647,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => setIsInteractMode((v) => !v)}
-              title="Toggle Interact Mode (I) — let clicks reach prototypes"
+              title="Toggle Interact Mode (I) — let clicks reach prototypes. Hold ⌘/Ctrl while pinching to zoom over a prototype."
               className={
                 'h-7 px-2 rounded-md text-[10px] font-bold uppercase tracking-wide transition-colors shrink-0 ' +
                 (isInteractMode
