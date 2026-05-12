@@ -70,6 +70,7 @@ export function useFigmaZoom(containerRef, options = {}) {
     deltaClamp = DEFAULT_DELTA_CLAMP,
     panDeltaClamp = DEFAULT_PAN_DELTA_CLAMP,
     onRailHit, // optional callback: (rail: 'min' | 'max') => void
+    onGestureStateChange, // optional: (active: boolean) => void — fires on transitions only
   } = options;
 
   // Library handles.
@@ -96,6 +97,9 @@ export function useFigmaZoom(containerRef, options = {}) {
     consecutiveRailHits: 0, // for wall-bump detection
     lastRailHitFiredAt: 0,  // debounce
   });
+
+  /** Tracks the last-fired gesture-active state, so onGestureStateChange fires only on transitions. */
+  const wasActiveRef = useRef(false);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -155,6 +159,11 @@ export function useFigmaZoom(containerRef, options = {}) {
         gestureRef.current.pivotX = null;
         gestureRef.current.pivotY = null;
         gestureRef.current.consecutiveRailHits = 0;
+        // Notify consumer that the gesture has fully ended (rAF is now idle).
+        if (wasActiveRef.current && typeof onGestureStateChange === 'function') {
+          onGestureStateChange(false);
+        }
+        wasActiveRef.current = false;
       } else {
         rafRef.current = requestAnimationFrame(tick);
       }
@@ -262,6 +271,12 @@ export function useFigmaZoom(containerRef, options = {}) {
       }
 
       ensureRafRunning();
+
+      // Notify consumer that a gesture is now active (fires only on transition from idle).
+      if (!wasActiveRef.current && typeof onGestureStateChange === 'function') {
+        onGestureStateChange(true);
+      }
+      wasActiveRef.current = true;
     };
 
     // Non-passive so we can preventDefault. This is scoped to the canvas container
@@ -287,5 +302,6 @@ export function useFigmaZoom(containerRef, options = {}) {
     deltaClamp,
     panDeltaClamp,
     onRailHit,
+    onGestureStateChange,
   ]);
 }

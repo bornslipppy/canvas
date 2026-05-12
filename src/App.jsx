@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
 
-// NEW: custom zoom pipeline
+// Custom zoom pipeline
 import { useFigmaZoom } from '@/hooks/useFigmaZoom'
 
 const PrototypeFrame = ({ title, src, width = '1280px', height = '720px' }) => {
@@ -51,10 +51,15 @@ const PrototypeFrame = ({ title, src, width = '1280px', height = '720px' }) => {
 }
 
 /**
- * CanvasContent is rendered INSIDE TransformWrapper so it can access
+ * CanvasContent is rendered INSIDE <TransformWrapper> so it can access
  * useControls() and useTransformContext() via useFigmaZoom().
+ *
+ * The `shieldActive` prop comes from App.jsx, which composes it from:
+ *   - isShiftPressed: false → shield down (let Shift+Click reach the iframe to drop a pin)
+ *   - isGestureActive: true → shield up (a wheel/pinch gesture is in flight; don't let click-through happen)
+ * Together: shieldActive = !isShiftPressed || isGestureActive
  */
-const CanvasContent = ({ frames, isSpacePressed, onRailHit, registerControls }) => {
+const CanvasContent = ({ frames, onRailHit, onGestureStateChange, registerControls, shieldActive }) => {
   const innerRef = useRef(null)
   const controls = useControls()
 
@@ -65,6 +70,7 @@ const CanvasContent = ({ frames, isSpacePressed, onRailHit, registerControls }) 
     minScale: 0.01,
     maxScale: 20,
     onRailHit,
+    onGestureStateChange,
   })
 
   return (
@@ -85,13 +91,17 @@ const CanvasContent = ({ frames, isSpacePressed, onRailHit, registerControls }) 
         </div>
 
         {/*
-          PHASE 3: shield is now ALWAYS on (not just during spacebar).
-          This routes wheel events over iframes to the canvas instead of
-          being captured by cross-origin iframe documents. Iframes here are
-          read-only design previews; for interactive iframes, implement a
-          click-to-enter toggle later.
+          Shift-drop shield.
+            shieldActive = true  → iframe receives nothing; wheel zoom works over iframes.
+            shieldActive = false → Shift+Click reaches the iframe (so the prototype
+                                   can capture it and postMessage a NEW_PIN back to us).
+          The shield is force-up during any active wheel gesture, even if Shift is
+          held, so a stray Shift tap mid-pinch can't redirect the wheel event into
+          the iframe.
         */}
-        <div className="absolute inset-0 z-[9998] pointer-events-auto" />
+        <div
+          className={`absolute inset-0 z-[9998] ${shieldActive ? 'pointer-events-auto' : 'pointer-events-none'}`}
+        />
       </div>
     </TransformComponent>
   )
@@ -103,13 +113,16 @@ export default function App() {
   const [isSpacePressed, setIsSpacePressed] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
 
-  // Wall-bump animation state. Set to 'min' or 'max' briefly when the user
-  // pushes past a zoom rail. Drives a 6px translate in CSS.
+  // Shield composition: drop the shield only when Shift is held AND no zoom gesture is in flight.
+  const [isShiftPressed, setIsShiftPressed] = useState(false)
+  const [isGestureActive, setIsGestureActive] = useState(false)
+  const shieldActive = !isShiftPressed || isGestureActive
+
+  // Wall-bump animation: 'min' or 'max' briefly when the user pushes past a zoom rail.
   const [bumpAxis, setBumpAxis] = useState(null)
   const bumpTimerRef = useRef(null)
 
-  // We hold a ref to the library's imperative controls so keyboard shortcuts
-  // can call setTransform without re-rendering anything.
+  // Library's imperative controls for keyboard shortcuts.
   const controlsRef = useRef(null)
   const registerControls = useCallback((c) => { controlsRef.current = c }, [])
 
@@ -119,9 +132,13 @@ export default function App() {
     bumpTimerRef.current = setTimeout(() => setBumpAxis(null), 200)
   }, [])
 
+  const handleGestureStateChange = useCallback((active) => {
+    setIsGestureActive(active)
+  }, [])
+
   const figmaCursor = `url("data:image/svg+xml,%3Csvg width='24' height='24' viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M7 4.5L7 18.5L11 14.5L17 14.5L7 4.5Z' fill='black' stroke='white' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E"), auto`
 
-  // Spacebar pan + browser-zoom prevention + recovery shortcuts.
+  // Single keyboard effect: spacebar pan + Shift tracking + recovery shortcuts + browser-zoom block.
   useEffect(() => {
     const preventBrowserZoom = (e) => {
       // Block native browser pinch-zoom of the page itself.
@@ -129,6 +146,11 @@ export default function App() {
     }
 
     const handleDown = (e) => {
+      // Track Shift regardless of focus — Shift+Click pin placement should work
+      // even if the URL input was previously focused. (When typing in the input,
+      // the click happens outside the input anyway, so this is harmless.)
+      if (e.key === 'Shift') setIsShiftPressed(true)
+
       const tag = e.target.tagName
       const isInInput = tag === 'INPUT' || tag === 'TEXTAREA'
       if (isInInput) return
@@ -139,11 +161,11 @@ export default function App() {
         return
       }
 
-      // PHASE 3: keyboard recovery shortcuts.
+      // Recovery shortcuts.
       const c = controlsRef.current
       if (!c) return
 
-      // Shift+1 → fit-all (approximate: center on origin at scale 0.5)
+      // Shift+1 → fit-all (initial scale, centered)
       if (e.shiftKey && e.code === 'Digit1') {
         e.preventDefault()
         c.setTransform(0, 0, 0.5, 200)
@@ -163,15 +185,27 @@ export default function App() {
       }
     }
 
-    const handleUp = (e) => { if (e.code === 'Space') setIsSpacePressed(false) }
+    const handleUp = (e) => {
+      if (e.key === 'Shift') setIsShiftPressed(false)
+      if (e.code === 'Space') setIsSpacePressed(false)
+    }
+
+    // Defensive: if the window loses focus mid-gesture (alt-tab, etc.), clear modifier state
+    // so the shield doesn't get stuck down.
+    const handleBlur = () => {
+      setIsShiftPressed(false)
+      setIsSpacePressed(false)
+    }
 
     window.addEventListener('wheel', preventBrowserZoom, { passive: false })
     window.addEventListener('keydown', handleDown)
     window.addEventListener('keyup', handleUp)
+    window.addEventListener('blur', handleBlur)
     return () => {
       window.removeEventListener('wheel', preventBrowserZoom)
       window.removeEventListener('keydown', handleDown)
       window.removeEventListener('keyup', handleUp)
+      window.removeEventListener('blur', handleBlur)
       if (bumpTimerRef.current) clearTimeout(bumpTimerRef.current)
     }
   }, [])
@@ -183,16 +217,23 @@ export default function App() {
     setNewUrl('')
   }
 
-  // Wall-bump transform: a tiny scale nudge when the user pushes past a rail.
-  // Applied OUTSIDE TransformWrapper so it doesn't fight the library's transform.
+  // Wall-bump CSS — applied to a wrapper OUTSIDE TransformWrapper so it doesn't fight the library's transform.
   const bumpStyle = bumpAxis
     ? { transform: bumpAxis === 'max' ? 'scale(1.005)' : 'scale(0.995)', transition: 'transform 100ms cubic-bezier(0.4, 0, 0.2, 1)' }
     : { transform: 'scale(1)', transition: 'transform 100ms cubic-bezier(0.4, 0, 0.2, 1)' }
 
+  // Cursor signals current mode at a glance.
+  // Priority: pan (space) > pin-placement intent (shift) > default canvas cursor.
+  const cursor = isSpacePressed
+    ? (isDragging ? 'grabbing' : 'grab')
+    : isShiftPressed && !isGestureActive
+      ? 'crosshair'  // Shift is held and no gesture in flight → clicks will reach the iframe
+      : figmaCursor
+
   return (
     <div
       className="relative w-full h-screen bg-slate-50 overflow-hidden"
-      style={{ cursor: isSpacePressed ? (isDragging ? 'grabbing' : 'grab') : figmaCursor }}
+      style={{ cursor }}
     >
       {/* FLOATING TOOLBAR */}
       <div className="absolute top-6 left-1/2 -translate-x-1/2 z-[100] w-[95%] max-w-3xl">
@@ -218,9 +259,13 @@ export default function App() {
           </form>
 
           <div className="pr-2 border-l pl-4 border-slate-100 flex items-center gap-2 shrink-0">
-            <div className={`h-2 w-2 rounded-full ${isSpacePressed ? 'bg-green-500 animate-pulse' : 'bg-slate-300'}`} />
+            <div className={`h-2 w-2 rounded-full ${
+              isSpacePressed ? 'bg-green-500 animate-pulse'
+              : isShiftPressed && !isGestureActive ? 'bg-sky-500 animate-pulse'
+              : 'bg-slate-300'
+            }`} />
             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest hidden md:block w-16">
-              {isSpacePressed ? 'Pan Mode' : 'Pointer'}
+              {isSpacePressed ? 'Pan Mode' : (isShiftPressed && !isGestureActive) ? 'Pin Mode' : 'Pointer'}
             </span>
           </div>
         </Card>
@@ -232,20 +277,21 @@ export default function App() {
           initialScale={0.5}
           minScale={0.01}
           maxScale={20}
-          // PHASE 2: library's wheel handler is fully disabled — we own wheel via useFigmaZoom.
+          // Library's wheel handler is fully disabled — we own wheel via useFigmaZoom.
           wheel={{ disabled: true }}
           // Drag-pan is still owned by the library, gated by spacebar.
           panning={{ disabled: !isSpacePressed, velocityDisabled: true }}
-          // No double-click zoom (it conflicts with the click-to-enter UX we may want later).
+          // No double-click zoom (would conflict with intended UX).
           doubleClick={{ disabled: true }}
           onPanningStart={() => setIsDragging(true)}
           onPanningStop={() => setIsDragging(false)}
         >
           <CanvasContent
             frames={frames}
-            isSpacePressed={isSpacePressed}
             onRailHit={handleRailHit}
+            onGestureStateChange={handleGestureStateChange}
             registerControls={registerControls}
+            shieldActive={shieldActive}
           />
         </TransformWrapper>
       </div>
