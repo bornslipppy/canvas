@@ -112,8 +112,28 @@ export function useFigmaZoom(containerRef, options = {}) {
      * The library exposes this via transformContext.transformState.
      */
     const readCurrent = () => {
-      const s = transformContext.transformState;
-      return { x: s.positionX, y: s.positionY, scale: s.scale };
+      // Primary: try known v4 context shapes.
+      const s = transformContext?.transformState ?? transformContext?.state;
+      if (s && s.positionX !== undefined) {
+        return { x: s.positionX, y: s.positionY, scale: s.scale };
+      }
+      // Fallback: parse the CSS transform string directly from the DOM.
+      // react-zoom-pan-pinch sets: translate(Xpx, Ypx) scale(S)
+      const wrapper = containerRef.current
+        ?.closest('.react-transform-component');
+      const t = wrapper?.style?.transform ?? '';
+      const m = t.match(
+        /translate\(([^,]+)px,\s*([^)]+)px\)\s*scale\(([^)]+)\)/
+      );
+      if (m) {
+        return {
+          x: parseFloat(m[1]),
+          y: parseFloat(m[2]),
+          scale: parseFloat(m[3]),
+        };
+      }
+      // Last resort: neutral state.
+      return { x: 0, y: 0, scale: 1 };
     };
 
     /** Seed targetRef from the library state if not yet set. */
@@ -293,7 +313,6 @@ export function useFigmaZoom(containerRef, options = {}) {
   }, [
     containerRef,
     setTransform,
-    transformContext,
     minScale,
     maxScale,
     zoomSensitivity,

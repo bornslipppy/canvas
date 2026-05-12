@@ -215,16 +215,41 @@ export default function App() {
     const trimmed = newUrl.trim()
     if (!trimmed) return
 
-    // Normalize: add http:// if no scheme is present.
-    // Match scheme like http://, https://, file://, etc.
     const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)
     const url = hasScheme ? trimmed : `http://${trimmed}`
 
-    // Functional update — uses the latest state, not the closure's snapshot.
-    setFrames((prev) => [
-      ...prev,
-      { id: `f-${Date.now()}`, url, title: `Frame ${prev.length + 1}` },
-    ])
+    setFrames((prev) => {
+      const next = [...prev, { id: `f-${Date.now()}`, url, title: `Frame ${prev.length + 1}` }]
+
+      setTimeout(() => {
+        const c = controlsRef.current
+        if (!c) return
+        // Each frame is 1280px wide. gap-32 = 128px. p-32 padding = 128px on each side.
+        // The flex container is centered inside the 10000px canvas.
+        const numFrames = next.length
+        const FRAME_W = 1280
+        const GAP = 128
+        const PAD = 128
+        const containerW = numFrames * FRAME_W + (numFrames - 1) * GAP + PAD * 2
+        const canvasCenter = 5000 // 10000px / 2
+        const containerLeft = canvasCenter - containerW / 2
+        const newFrameIndex = numFrames - 1
+        const frameCenterX = containerLeft + PAD + newFrameIndex * (FRAME_W + GAP) + FRAME_W / 2
+        const frameCenterY = 5000
+
+        const scale = 0.5
+        const vw = window.innerWidth
+        const vh = window.innerHeight
+        c.setTransform(
+          vw / 2 - frameCenterX * scale,
+          vh / 2 - frameCenterY * scale,
+          scale,
+          400
+        )
+      }, 50)
+
+      return next
+    })
     setNewUrl('')
   }
 
@@ -291,6 +316,7 @@ export default function App() {
           initialScale={0.5}
           minScale={0.01}
           maxScale={20}
+          centerOnInit
           // Library's wheel handler is fully disabled — we own wheel via useFigmaZoom.
           wheel={{ disabled: true }}
           // Drag-pan is still owned by the library, gated by spacebar.
