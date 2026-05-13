@@ -1,13 +1,22 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import { TransformWrapper, TransformComponent, useControls } from 'react-zoom-pan-pinch'
 
+import { Plus } from 'lucide-react'
+
 // Import Shadcn Components
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
+import { BlackbirdMark } from "@/components/BlackbirdMark"
 
 // Custom zoom pipeline
 import { useFigmaZoom } from '@/hooks/useFigmaZoom'
+
+// Comments layer
+import { CommentsProvider, useComments } from './comments/CommentsContext'
+import { FramePins } from './comments/FramePins'
+import { CommentDrawer } from './comments/CommentDrawer'
+import { framePinColor } from './comments/frameColor'
 
 const FRAME_W = 1280
 const FRAME_H = 720
@@ -59,31 +68,61 @@ const PrototypeFrame = memo(({ id, title, src, x, y, isDragging, onDragStart, wi
       */}
       <h3
         onMouseDown={(e) => onDragStart(e, id)}
-        className={`text-[12px] font-bold text-slate-500 tracking-widest uppercase select-none ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
+        className={`text-[12px] font-bold text-neutral-500 tracking-widest uppercase select-none ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
         style={{ position: 'absolute', top: -28, left: 4, zIndex: 9999 }}
         title="Drag to move this frame"
       >
         {title}
       </h3>
       <div
-        className="relative shadow-2xl rounded-xl overflow-hidden border border-slate-200 bg-white"
+        className="relative shadow-2xl rounded-xl overflow-hidden border border-neutral-200 bg-white"
         style={{ width, height, zIndex: isDragging ? 1 : 'auto' }}
       >
-        <iframe src={src} className="w-full h-full border-none z-10" title={title} />
+        <iframe
+          src={src}
+          className="w-full h-full border-none z-10"
+          title={title}
+          data-frame-id={id}
+        />
+        {/* Comment pins for THIS frame, scoped to its currently reported route. */}
+        <FramePins frameId={id} frameTitle={title} />
         {pins.map((pin) => (
           <div
             key={pin.id}
-            className="absolute w-6 h-6 bg-sky-500 rounded-full shadow-[0_0_0_4px_rgba(14,165,233,0.2)] z-20 flex items-center justify-center border-2 border-white animate-in zoom-in duration-300"
+            className="absolute w-6 h-6 bg-neutral-900 rounded-full shadow-[0_0_0_4px_rgba(0,0,0,0.2)] z-20 flex items-center justify-center border-2 border-white animate-in zoom-in duration-300"
             style={{ left: pin.x, top: pin.y, transform: 'translate(-50%, -50%)', pointerEvents: 'none' }}
           >
             <div className="w-1 h-1 bg-white rounded-full" />
           </div>
         ))}
       </div>
+      {/* Frame color dot — tiny indicator above the title showing the comment
+          color for this frame, so it's obvious which pins belong to it. */}
+      <FrameBadge frameId={id} />
     </div>
   )
 })
 PrototypeFrame.displayName = 'PrototypeFrame'
+
+/** Tiny color dot anchored near the frame title. Color is a stable hash of frameId. */
+function FrameBadge({ frameId }) {
+  return (
+    <span
+      style={{
+        position: 'absolute',
+        top: -28,
+        right: 4,
+        width: 8,
+        height: 8,
+        borderRadius: 2,
+        background: framePinColor(frameId),
+        zIndex: 9999,
+        pointerEvents: 'none',
+      }}
+      aria-hidden="true"
+    />
+  )
+}
 
 /**
  * CanvasContent is rendered INSIDE <TransformWrapper> so it can access
@@ -94,7 +133,7 @@ PrototypeFrame.displayName = 'PrototypeFrame'
  *   - isGestureActive: true → shield up (a wheel/pinch gesture is in flight; don't let click-through happen)
  * Together: shieldActive = !isShiftPressed || isGestureActive
  */
-const CanvasContent = ({ frames, onRailHit, onGestureStateChange, registerControls, shieldActive, onFrameDragStart, draggingFrameId }) => {
+const CanvasContent = ({ frames, onRailHit, onGestureStateChange, registerControls, shieldActive, onFrameDragStart, draggingFrameId, onShieldClick }) => {
   const innerRef = useRef(null)
   const controls = useControls()
 
@@ -114,7 +153,7 @@ const CanvasContent = ({ frames, onRailHit, onGestureStateChange, registerContro
         ref={innerRef}
         className="w-[10000px] h-[10000px] relative"
         style={{
-          backgroundImage: `radial-gradient(#e2e8f0 2px, transparent 2px)`,
+          backgroundImage: `radial-gradient(#d4d4d4 2px, transparent 2px)`,
           backgroundSize: '30px 30px',
           touchAction: 'none', // We own all gestures inside the canvas
         }}
@@ -149,6 +188,7 @@ const CanvasContent = ({ frames, onRailHit, onGestureStateChange, registerContro
         */}
         <div
           className={`absolute inset-0 z-[9998] ${shieldActive ? 'pointer-events-auto' : 'pointer-events-none'}`}
+          onClick={onShieldClick}
         />
       </div>
     </TransformComponent>
@@ -156,6 +196,25 @@ const CanvasContent = ({ frames, onRailHit, onGestureStateChange, registerContro
 }
 
 export default function App() {
+  return (
+    <CommentsProvider>
+      <AppInner />
+    </CommentsProvider>
+  )
+}
+
+function AppInner() {
+  // Comments layer state (lives in context). We pull what we need for shield
+  // composition, cursor logic, click-to-place, and pan-to-frame here.
+  const {
+    commentMode,
+    toggleCommentMode,
+    placeDraftAt,
+    drawerOpen,
+    setDrawerOpen,
+    comments,
+  } = useComments()
+
   // Frame world-space coords: top-left of the iframe body in canvas world space.
   // Canvas is 10000x10000 with origin (0,0) at top-left, so center is (5000, 5000).
   const [frames, setFrames] = useState([{
@@ -174,14 +233,16 @@ export default function App() {
   //   canvasOverride     (canvas wins regardless):   gesture active, OR Cmd/Ctrl held
   //                                                  (zoom intent), OR Space held
   //                                                  (pan intent — must raise the
-  //                                                  shield so library mousedown fires)
+  //                                                  shield so library mousedown fires),
+  //                                                  OR comment mode on (clicks become
+  //                                                  pin placements)
   // Shield is up unless clickthrough wins. canvasOverride trumps clickthrough.
   const [isShiftPressed, setIsShiftPressed] = useState(false)
   const [isGestureActive, setIsGestureActive] = useState(false)
   const [isInteractMode, setIsInteractMode] = useState(false)
   const [isZoomModifierPressed, setIsZoomModifierPressed] = useState(false)
   const clickthroughIntent = isShiftPressed || isInteractMode
-  const canvasOverride = isGestureActive || isZoomModifierPressed || isSpacePressed
+  const canvasOverride = isGestureActive || isZoomModifierPressed || isSpacePressed || commentMode
   const shieldActive = !clickthroughIntent || canvasOverride
 
   // Frame drag state: null when no drag in progress, otherwise carries the frame
@@ -236,6 +297,34 @@ export default function App() {
     c.setTransform(newX, newY, newScale, 200)
   }, [])
 
+  /**
+   * Pan/zoom the canvas to center on a specific frame. Used when the user
+   * clicks a frame header in the comment drawer — jump to the frame so they
+   * can see its pins. Scale is preserved unless we're really zoomed out, in
+   * which case we zoom in to a sensible level first.
+   */
+  const panToFrame = useCallback((frameId) => {
+    const frame = frames.find((f) => f.id === frameId)
+    if (!frame) return
+    const c = controlsRef.current
+    if (!c) return
+    const componentEl = document.querySelector('.react-transform-component')
+    const t = componentEl?.style?.transform ?? ''
+    const m = t.match(/translate\(([^,]+)px,\s*([^)]+)px\)\s*scale\(([^)]+)\)/)
+    const currentScale = m ? parseFloat(m[3]) : 0.5
+    const scale = Math.max(0.4, currentScale)
+    const frameCenterX = frame.x + FRAME_W / 2
+    const frameCenterY = frame.y + FRAME_TOTAL_H / 2
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    c.setTransform(
+      vw / 2 - frameCenterX * scale,
+      vh / 2 - frameCenterY * scale,
+      scale,
+      400
+    )
+  }, [frames])
+
   const figmaCursor = `url("data:image/svg+xml,%3Csvg width='24' height='24' viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M7 4.5L7 18.5L11 14.5L17 14.5L7 4.5Z' fill='black' stroke='white' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E"), auto`
 
   // Single keyboard effect: spacebar pan + Shift tracking + recovery shortcuts + browser-zoom block.
@@ -273,6 +362,15 @@ export default function App() {
         if (e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return
         e.preventDefault()
         setIsInteractMode((v) => !v)
+        return
+      }
+
+      // 'C' → toggle Comment mode (place a comment pin). Ignored inside inputs
+      // (early-returned above) so typing URLs containing 'c' doesn't flip the mode.
+      if (e.key === 'c' || e.key === 'C') {
+        if (e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return
+        e.preventDefault()
+        toggleCommentMode()
         return
       }
 
@@ -571,53 +669,55 @@ export default function App() {
     : { transform: 'scale(1)', transition: 'transform 100ms cubic-bezier(0.4, 0, 0.2, 1)' }
 
   // Cursor signals current mode at a glance.
-  // Priority: frame-drag > pan (space) > pin-placement (shift) > interact-passthrough > default.
+  // Priority: frame-drag > comment-mode > pan (space) > pin-placement (shift)
+  //           > interact-passthrough > default.
   const cursor = dragState
     ? 'grabbing'  // dragging a frame — global grabbing cursor for clean feel
-    : isSpacePressed
-      ? (isDragging ? 'grabbing' : 'grab')
-      : isShiftPressed && !isGestureActive
-        ? 'crosshair'  // Shift is held and no gesture in flight → clicks will reach the iframe
-        : isInteractMode && !isZoomModifierPressed
-          ? 'default'  // Interact mode → iframe shows its own cursor; pressing Cmd flips back to canvas control
-          : figmaCursor
+    : commentMode
+      ? 'crosshair'  // about to drop a comment pin
+      : isSpacePressed
+        ? (isDragging ? 'grabbing' : 'grab')
+        : isShiftPressed && !isGestureActive
+          ? 'crosshair'  // Shift is held and no gesture in flight → clicks will reach the iframe
+          : isInteractMode && !isZoomModifierPressed
+            ? 'default'  // Interact mode → iframe shows its own cursor; pressing Cmd flips back to canvas control
+            : figmaCursor
 
   return (
     <div
       ref={rootRef}
       tabIndex={-1}
-      className="relative w-full h-screen bg-slate-50 overflow-hidden outline-none"
+      className="relative w-full h-screen bg-neutral-50 overflow-hidden outline-none"
       style={{ cursor }}
     >
       {/* FLOATING TOOLBAR — single horizontal strip (Card defaults are flex-col + py-4; override here) */}
       <div className="absolute top-6 left-1/2 -translate-x-1/2 z-[100] w-[95%] max-w-6xl">
-        <Card className="flex flex-row flex-nowrap items-center gap-3 px-3 py-2 shadow-xl border-slate-200/60 bg-white/95 backdrop-blur-md">
+        <Card className="flex flex-row flex-nowrap items-center gap-3 px-3 py-2 shadow-xl border-neutral-200/60 bg-white/95 backdrop-blur-md">
           <div className="font-bold text-xs tracking-tighter flex items-center gap-1.5 shrink-0 whitespace-nowrap">
-            <div className="w-5 h-5 bg-slate-900 rounded-md flex items-center justify-center shrink-0">
-              <div className="w-1 h-1 bg-sky-400 rounded-full animate-pulse" />
-            </div>
-            <span>
-              CANVAS<span className="text-sky-500">AI</span>
-            </span>
+            <BlackbirdMark />
+            <span>Blackbird</span>
           </div>
 
           <form onSubmit={handleAddFrame} className="flex flex-1 min-w-0 items-center gap-2">
-            <Input
-              type="text"
-              inputMode="url"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="Paste prototype URL..."
-              value={newUrl}
-              onChange={(e) => setNewUrl(e.target.value)}
-              className="h-8 min-w-0 bg-slate-100/50 border-slate-200 focus-visible:ring-sky-500/30 text-sm flex-1"
-            />
-            <Button type="submit" size="sm" className="bg-slate-900 hover:bg-slate-800 h-8 px-3 text-xs shrink-0">
-              Deploy View
+            <div className="flex min-w-0 flex-1 items-center justify-end">
+              <Input
+                type="text"
+                inputMode="url"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="Paste prototype URL..."
+                value={newUrl}
+                onChange={(e) => setNewUrl(e.target.value)}
+                className="h-8 w-[85%] min-w-0 bg-neutral-100/50 border-neutral-200 focus-visible:ring-black/25 text-sm"
+              />
+            </div>
+            <Button type="submit" size="sm" className="hover:bg-neutral-900 h-8 px-3 text-xs shrink-0">
+              <Plus className="size-3.5 shrink-0" aria-hidden strokeWidth={2.5} />
+              Add
             </Button>
           </form>
 
-          <div className="border-l border-slate-100 pl-3 flex items-center gap-2 shrink-0 whitespace-nowrap">
+          <div className="border-l border-neutral-100 pl-3 flex items-center gap-2 shrink-0 whitespace-nowrap">
             {/*
               Zoom buttons. Useful in Interact mode where pinching over an
               iframe is captured by the iframe — these always work because
@@ -627,7 +727,7 @@ export default function App() {
               type="button"
               onClick={() => zoomBy(1 / 1.2)}
               title="Zoom out"
-              className="h-7 w-7 rounded-md text-sm font-bold bg-slate-100 text-slate-600 hover:bg-slate-200 transition-colors shrink-0"
+              className="h-7 w-7 rounded-md text-sm font-bold bg-neutral-100 text-neutral-600 hover:bg-neutral-200 transition-colors shrink-0"
             >
               −
             </button>
@@ -635,9 +735,43 @@ export default function App() {
               type="button"
               onClick={() => zoomBy(1.2)}
               title="Zoom in"
-              className="h-7 w-7 rounded-md text-sm font-bold bg-slate-100 text-slate-600 hover:bg-slate-200 transition-colors shrink-0"
+              className="h-7 w-7 rounded-md text-sm font-bold bg-neutral-100 text-neutral-600 hover:bg-neutral-200 transition-colors shrink-0"
             >
               +
+            </button>
+            {/*
+              Comments. Two buttons:
+              - Comments [N] — opens the side drawer
+              - Place — enters placement mode (or press C); click a prototype to drop a pin
+            */}
+            <button
+              type="button"
+              onClick={() => setDrawerOpen(!drawerOpen)}
+              title="Open comments drawer"
+              className={
+                'h-7 px-2 rounded-md text-[10px] font-bold uppercase tracking-wide transition-colors shrink-0 ' +
+                (drawerOpen
+                  ? 'bg-neutral-900 text-white hover:bg-neutral-800'
+                  : 'bg-neutral-100 text-neutral-500 hover:bg-neutral-200')
+              }
+            >
+              Comments
+              {comments.length > 0 ? (
+                <span className="ml-1 opacity-75">{comments.length}</span>
+              ) : null}
+            </button>
+            <button
+              type="button"
+              onClick={toggleCommentMode}
+              title="Place a new comment (C) — click on a prototype to drop a pin"
+              className={
+                'h-7 px-2 rounded-md text-[10px] font-bold uppercase tracking-wide transition-colors shrink-0 ' +
+                (commentMode
+                  ? 'bg-orange-500 text-white hover:bg-orange-600'
+                  : 'bg-neutral-100 text-neutral-500 hover:bg-neutral-200')
+              }
+            >
+              Place
             </button>
             {/*
               Interact toggle. Discoverable equivalent of the 'I' hotkey.
@@ -652,25 +786,28 @@ export default function App() {
                 'h-7 px-2 rounded-md text-[10px] font-bold uppercase tracking-wide transition-colors shrink-0 ' +
                 (isInteractMode
                   ? 'bg-amber-500 text-white hover:bg-amber-600'
-                  : 'bg-slate-100 text-slate-500 hover:bg-slate-200')
+                  : 'bg-neutral-100 text-neutral-500 hover:bg-neutral-200')
               }
             >
               Interact
             </button>
             <div className={`h-2 w-2 rounded-full ${
-              isSpacePressed ? 'bg-green-500 animate-pulse'
-              : isShiftPressed && !isGestureActive ? 'bg-sky-500 animate-pulse'
+              commentMode ? 'bg-orange-500 animate-pulse'
+              : isSpacePressed ? 'bg-green-500 animate-pulse'
+              : isShiftPressed && !isGestureActive ? 'bg-neutral-900 animate-pulse'
               : isInteractMode ? 'bg-amber-500 animate-pulse'
-              : 'bg-slate-300'
+              : 'bg-neutral-300'
             }`} />
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wide hidden sm:inline tabular-nums">
-              {isSpacePressed
-                ? 'Pan Mode'
-                : (isShiftPressed && !isGestureActive)
-                  ? 'Pin Mode'
-                  : isInteractMode
-                    ? 'Interact'
-                    : 'Pointer'}
+            <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wide hidden sm:inline tabular-nums">
+              {commentMode
+                ? 'Place'
+                : isSpacePressed
+                  ? 'Pan Mode'
+                  : (isShiftPressed && !isGestureActive)
+                    ? 'Pin Mode'
+                    : isInteractMode
+                      ? 'Interact'
+                      : 'Pointer'}
             </span>
           </div>
         </Card>
@@ -700,9 +837,50 @@ export default function App() {
             shieldActive={shieldActive}
             onFrameDragStart={handleFrameDragStart}
             draggingFrameId={dragState?.frameId ?? null}
+            onShieldClick={(e) => {
+              if (commentMode) placeDraftAt(e.clientX, e.clientY)
+            }}
           />
         </TransformWrapper>
       </div>
+
+      {/* Comments drawer (slides in from right). Lives outside the world canvas
+          so it doesn't scale with zoom. */}
+      <CommentDrawer frames={frames} onSelectFrame={panToFrame} />
+
+      {/* Placement-mode banner: helps the user know what to do next. */}
+      {commentMode ? (
+        <div
+          style={{
+            position: 'fixed',
+            bottom: 24,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            background: 'rgba(23, 23, 23, 0.92)',
+            color: 'white',
+            padding: '8px 14px',
+            borderRadius: 999,
+            fontSize: 12,
+            fontWeight: 600,
+            letterSpacing: 0.3,
+            zIndex: 150,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            pointerEvents: 'none',
+          }}
+        >
+          <span
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: '50%',
+              background: '#fb923c',
+            }}
+          />
+          Click on a prototype to drop a comment — Esc to cancel
+        </div>
+      ) : null}
     </div>
   )
 }
