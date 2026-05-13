@@ -1,6 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { X } from 'lucide-react'
+
 import { useComments } from './CommentsContext'
 import { frameBadgeColor, frameBadgeTextColor, framePinColor } from './frameColor'
+
+/** Dark palette aligned with the bottom toolbar tray (`#343434`, neutral lifts). */
+const D = {
+  surface: '#343434',
+  border: '1px solid rgba(255, 255, 255, 0.1)',
+  text: '#e5e7eb',
+  muted: '#9ca3af',
+  faint: '#737373',
+  inputBg: 'rgba(38, 38, 38, 0.92)',
+  inputBorder: '1px solid rgba(255, 255, 255, 0.12)',
+  rowSelected: 'rgba(255, 255, 255, 0.08)',
+  accentBar: '#60a5fa',
+  shadow: '-12px 0 44px rgba(0, 0, 0, 0.55)',
+  badgeBg: 'rgba(255, 255, 255, 0.08)',
+}
 
 /**
  * The side drawer. Slides in from the right when `drawerOpen` is true.
@@ -82,10 +99,37 @@ export function CommentDrawer({ frames, onSelectFrame }) {
     return n
   }, [grouped])
 
+  /**
+   * Click-outside to dismiss. Installed only while the drawer is open so we
+   * don't pay the listener cost during normal canvas usage.
+   *
+   * Two escape hatches:
+   *   - Clicks inside the drawer itself (compose, comment rows, scrollbar) are ignored
+   *   - Clicks inside any element marked `data-drawer-safe` are ignored — the
+   *     toolbar uses this so its Comments toggle still works (without the
+   *     escape hatch, clicking the toggle would close-then-reopen and net to closed)
+   *
+   * Listening on `mousedown` so the close fires before any onClick handlers
+   * inside the canvas (e.g., placing a comment pin) — the user expects
+   * "click outside to close" to feel instant.
+   */
+  const drawerRef = useRef(null)
+  useEffect(() => {
+    if (!drawerOpen) return
+    const onMouseDown = (e) => {
+      if (drawerRef.current && drawerRef.current.contains(e.target)) return
+      if (e.target.closest && e.target.closest('[data-drawer-safe]')) return
+      setDrawerOpen(false)
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    return () => document.removeEventListener('mousedown', onMouseDown)
+  }, [drawerOpen, setDrawerOpen])
+
   if (!drawerOpen) return null
 
   return (
     <div
+      ref={drawerRef}
       role="dialog"
       aria-label="Comments"
       style={{
@@ -94,21 +138,22 @@ export function CommentDrawer({ frames, onSelectFrame }) {
         right: 0,
         bottom: 0,
         width: 380,
-        background: 'white',
-        borderLeft: '1px solid #e2e8f0',
-        boxShadow: '-8px 0 24px rgba(15, 23, 42, 0.08)',
+        background: D.surface,
+        borderLeft: D.border,
+        boxShadow: D.shadow,
         zIndex: 200,
         display: 'flex',
         flexDirection: 'column',
         fontSize: 13,
-        color: '#0f172a',
+        color: D.text,
+        colorScheme: 'dark',
       }}
     >
       {/* HEADER */}
       <div
         style={{
           padding: '14px 16px',
-          borderBottom: '1px solid #e2e8f0',
+          borderBottom: D.border,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -122,10 +167,11 @@ export function CommentDrawer({ frames, onSelectFrame }) {
               marginLeft: 8,
               fontSize: 11,
               fontWeight: 600,
-              color: '#64748b',
+              color: D.muted,
               padding: '2px 8px',
-              background: '#f1f5f9',
+              background: D.badgeBg,
               borderRadius: 999,
+              border: D.border,
             }}
           >
             {totalVisible}
@@ -137,7 +183,7 @@ export function CommentDrawer({ frames, onSelectFrame }) {
           aria-label="Close comments drawer"
           style={drawerIconBtnStyle}
         >
-          ✕
+          <X className="h-4 w-4 shrink-0" aria-hidden strokeWidth={2} />
         </button>
       </div>
 
@@ -145,7 +191,7 @@ export function CommentDrawer({ frames, onSelectFrame }) {
       <div
         style={{
           padding: '10px 16px',
-          borderBottom: '1px solid #e2e8f0',
+          borderBottom: D.border,
           display: 'flex',
           gap: 8,
           alignItems: 'center',
@@ -156,15 +202,16 @@ export function CommentDrawer({ frames, onSelectFrame }) {
           placeholder="Your name"
           value={authorName}
           onChange={(e) => setAuthorName(e.target.value)}
+          className="placeholder:text-neutral-500"
           style={{
             flex: 1,
             height: 30,
             padding: '0 10px',
             fontSize: 12,
-            background: '#f8fafc',
-            border: '1px solid #e2e8f0',
+            background: D.inputBg,
+            border: D.inputBorder,
             borderRadius: 6,
-            color: '#0f172a',
+            color: D.text,
             outline: 'none',
           }}
         />
@@ -174,21 +221,23 @@ export function CommentDrawer({ frames, onSelectFrame }) {
             alignItems: 'center',
             gap: 6,
             fontSize: 11,
-            color: '#64748b',
+            color: D.muted,
             cursor: 'pointer',
+            userSelect: 'none',
           }}
         >
           <input
             type="checkbox"
             checked={showResolved}
             onChange={(e) => setShowResolved(e.target.checked)}
+            style={{ accentColor: '#60a5fa', width: 14, height: 14, cursor: 'pointer' }}
           />
           Resolved
         </label>
       </div>
 
       {/* BODY */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
+      <div className="min-h-0 flex-1 overflow-y-auto py-2 [scrollbar-color:rgba(255,255,255,0.18)_transparent] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/20 [&::-webkit-scrollbar-track]:bg-transparent">
         {/* Draft composer (top, when a pin is placed) */}
         {draftPlacement ? (
           <DraftComposer
@@ -206,9 +255,9 @@ export function CommentDrawer({ frames, onSelectFrame }) {
 
         {grouped.size === 0 && !draftPlacement ? (
           <div style={emptyStateStyle}>
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>No comments yet</div>
-            <div style={{ fontSize: 12, color: '#64748b' }}>
-              Click <strong>Place</strong> in the toolbar, then click on a prototype
+            <div style={{ fontWeight: 600, marginBottom: 4, color: D.text }}>No comments yet</div>
+            <div style={{ fontSize: 12, color: D.muted }}>
+              Click <strong style={{ color: D.text }}>Place</strong> in the toolbar, then click on a prototype
               to drop a pin.
             </div>
             <button
@@ -239,7 +288,7 @@ export function CommentDrawer({ frames, onSelectFrame }) {
                   background: 'transparent',
                   border: 'none',
                   cursor: frameExists ? 'pointer' : 'default',
-                  color: frameExists ? '#0f172a' : '#94a3b8',
+                  color: frameExists ? D.text : D.muted,
                   fontWeight: 600,
                   fontSize: 12,
                 }}
@@ -257,7 +306,7 @@ export function CommentDrawer({ frames, onSelectFrame }) {
                 <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {frameTitle}
                   {!frameExists ? (
-                    <span style={{ fontWeight: 400, color: '#94a3b8' }}> · deleted</span>
+                    <span style={{ fontWeight: 400, color: D.faint }}> · deleted</span>
                   ) : null}
                 </span>
               </button>
@@ -267,7 +316,7 @@ export function CommentDrawer({ frames, onSelectFrame }) {
                     style={{
                       padding: '2px 16px 4px 30px',
                       fontSize: 10,
-                      color: '#64748b',
+                      color: D.faint,
                       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
                     }}
                   >
@@ -303,8 +352,8 @@ function DraftComposer({
       style={{
         margin: '0 16px 12px',
         padding: 12,
-        background: '#fef3c7',
-        border: '1px solid #fde68a',
+        background: 'rgba(234, 179, 8, 0.08)',
+        border: '1px solid rgba(250, 204, 21, 0.22)',
         borderRadius: 8,
       }}
     >
@@ -328,14 +377,14 @@ function DraftComposer({
           <span
             style={{
               fontSize: 10,
-              color: '#92400e',
+              color: '#fbbf24',
               fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
             }}
           >
             {draftPlacement.route}
           </span>
         ) : (
-          <span style={{ fontSize: 10, color: '#92400e' }}>
+          <span style={{ fontSize: 10, color: '#fbbf24', opacity: 0.85 }}>
             (route not reported)
           </span>
         )}
@@ -352,17 +401,19 @@ function DraftComposer({
         }}
         placeholder="Leave a comment…"
         rows={3}
+        className="placeholder:text-neutral-500"
         style={{
           width: '100%',
           resize: 'vertical',
           padding: 8,
           fontSize: 13,
-          border: '1px solid #fde68a',
+          border: D.inputBorder,
           borderRadius: 6,
-          background: 'white',
-          color: '#0f172a',
+          background: D.inputBg,
+          color: D.text,
           outline: 'none',
           fontFamily: 'inherit',
+          boxSizing: 'border-box',
         }}
       />
       <div style={{ marginTop: 8, display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
@@ -394,9 +445,9 @@ function CommentRow({ comment, number, isSelected, onSelect, onResolve, onDelete
       style={{
         padding: '8px 16px 8px 30px',
         cursor: 'pointer',
-        background: isSelected ? '#eff6ff' : 'transparent',
-        borderLeft: isSelected ? '2px solid #0ea5e9' : '2px solid transparent',
-        opacity: resolved ? 0.6 : 1,
+        background: isSelected ? D.rowSelected : 'transparent',
+        borderLeft: isSelected ? `2px solid ${D.accentBar}` : '2px solid transparent',
+        opacity: resolved ? 0.55 : 1,
       }}
     >
       <div
@@ -415,17 +466,17 @@ function CommentRow({ comment, number, isSelected, onSelect, onResolve, onDelete
         >
           #{number}
         </span>
-        <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600 }}>
+        <span style={{ fontSize: 11, color: D.muted, fontWeight: 600 }}>
           {comment.author}
         </span>
-        <span style={{ fontSize: 10, color: '#94a3b8', marginLeft: 'auto' }}>
+        <span style={{ fontSize: 10, color: D.faint, marginLeft: 'auto' }}>
           {timeAgo(comment.createdAt)}
         </span>
       </div>
       <div
         style={{
           fontSize: 13,
-          color: '#0f172a',
+          color: D.text,
           lineHeight: 1.45,
           textDecoration: resolved ? 'line-through' : 'none',
           whiteSpace: 'pre-wrap',
@@ -452,7 +503,7 @@ function CommentRow({ comment, number, isSelected, onSelect, onResolve, onDelete
               e.stopPropagation()
               onDelete()
             }}
-            style={{ ...secondaryBtnStyle, color: '#b91c1c' }}
+            style={{ ...secondaryBtnStyle, color: '#fca5a5', borderColor: 'rgba(248, 113, 113, 0.35)' }}
           >
             Delete
           </button>
@@ -482,14 +533,16 @@ const drawerIconBtnStyle = {
   background: 'transparent',
   cursor: 'pointer',
   borderRadius: 4,
-  color: '#475569',
-  fontSize: 14,
+  color: '#a3a3a3',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
 }
 
 const primaryBtnStyle = {
   padding: '6px 12px',
-  background: '#0f172a',
-  color: 'white',
+  background: '#e5e7eb',
+  color: '#171717',
   border: 'none',
   borderRadius: 6,
   cursor: 'pointer',
@@ -499,9 +552,9 @@ const primaryBtnStyle = {
 
 const secondaryBtnStyle = {
   padding: '4px 10px',
-  background: 'white',
-  color: '#0f172a',
-  border: '1px solid #e2e8f0',
+  background: 'rgba(38, 38, 38, 0.6)',
+  color: '#e5e7eb',
+  border: '1px solid rgba(255, 255, 255, 0.15)',
   borderRadius: 6,
   cursor: 'pointer',
   fontSize: 11,
@@ -511,7 +564,7 @@ const secondaryBtnStyle = {
 const emptyStateStyle = {
   padding: '32px 16px',
   textAlign: 'center',
-  color: '#475569',
+  color: '#9ca3af',
 }
 
 function timeAgo(iso) {

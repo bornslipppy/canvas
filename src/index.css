@@ -8,16 +8,20 @@
     "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
   --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco,
     Consolas, "Liberation Mono", "Courier New", monospace;
+  /** App ink: replaces pure black (#000 / neutral-900) for UI and text. */
+  --color-brand-ink: #1a191e;
+  --color-brand-ink-hover: #35343d;
+  --color-black: #1a191e;
 }
 
 :root {
   --background: oklch(1 0 0);
-  --foreground: oklch(0.129 0 0);
+  --foreground: #1a191e;
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.129 0 0);
+  --card-foreground: #1a191e;
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.129 0 0);
-  --primary: oklch(0 0 0);
+  --popover-foreground: #1a191e;
+  --primary: #1a191e;
   --primary-foreground: oklch(1 0 0);
   --secondary: oklch(0.961 0 0);
   --secondary-foreground: oklch(0.208 0 0);
@@ -37,8 +41,8 @@
   --chart-5: oklch(0.769 0.188 70.08);
   --radius: 0.625rem;
   --sidebar: oklch(0.984 0 0);
-  --sidebar-foreground: oklch(0.129 0 0);
-  --sidebar-primary: oklch(0 0 0);
+  --sidebar-foreground: #1a191e;
+  --sidebar-primary: #1a191e;
   --sidebar-primary-foreground: oklch(1 0 0);
   --sidebar-accent: oklch(0.961 0 0);
   --sidebar-accent-foreground: oklch(0.208 0 0);
@@ -54,7 +58,7 @@
   --popover: oklch(0.129 0 0);
   --popover-foreground: oklch(0.984 0 0);
   --primary: oklch(1 0 0);
-  --primary-foreground: oklch(0.15 0 0);
+  --primary-foreground: #1a191e;
   --secondary: oklch(0.279 0 0);
   --secondary-foreground: oklch(0.984 0 0);
   --muted: oklch(0.279 0 0);
@@ -75,7 +79,7 @@
   --sidebar: oklch(0.208 0 0);
   --sidebar-foreground: oklch(0.984 0 0);
   --sidebar-primary: oklch(1 0 0);
-  --sidebar-primary-foreground: oklch(0.15 0 0);
+  --sidebar-primary-foreground: #1a191e;
   --sidebar-accent: oklch(0.279 0 0);
   --sidebar-accent-foreground: oklch(0.984 0 0);
   --sidebar-border: oklch(0.279 0 0);

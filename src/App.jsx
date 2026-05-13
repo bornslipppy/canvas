@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react'
+import { createPortal } from 'react-dom'
 import { TransformWrapper, TransformComponent, useControls } from 'react-zoom-pan-pinch'
 
-import { Plus, Upload } from 'lucide-react'
+import { Plus, Upload, FolderUp, ChevronDown, MessageCircle, MapPin, MousePointerClick, GripVertical } from 'lucide-react'
 
 // Import Shadcn Components
 import { Button } from "@/components/ui/button"
@@ -17,6 +18,10 @@ import { CommentsProvider, useComments } from './comments/CommentsContext'
 import { FramePins } from './comments/FramePins'
 import { CommentDrawer } from './comments/CommentDrawer'
 import { framePinColor } from './comments/frameColor'
+
+// Folder upload (Tier 2 — Service Worker virtual filesystem)
+import { registerPreviewSW } from './preview/registerSW'
+import { uploadFolderBundle } from './preview/processBundle'
 
 const FRAME_W = 1280
 const FRAME_H = 720
@@ -63,19 +68,19 @@ const PrototypeFrame = memo(({ id, title, src, srcDoc, x, y, isDragging, onDragS
       data-frame-id={id}
     >
       {/*
-        Title sits above the iframe (top: -28) and above the shield (z-9999).
+        Title sits above the iframe (top: -36) and above the shield (z-9999).
         Drag handle. The select-none + cursor changes make it feel like Figma.
       */}
       <h3
         onMouseDown={(e) => onDragStart(e, id)}
-        className={`text-[12px] font-bold text-neutral-500 tracking-widest uppercase select-none ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
-        style={{ position: 'absolute', top: -28, left: 4, zIndex: 9999 }}
+        className={`text-[12px] font-semibold text-neutral-400 tracking-wide normal-case select-none ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
+        style={{ position: 'absolute', top: -36, left: 4, zIndex: 9999 }}
         title="Drag to move this frame"
       >
         {title}
       </h3>
       <div
-        className="relative shadow-2xl rounded-xl overflow-hidden border border-neutral-200 bg-white"
+        className="relative rounded-xl overflow-hidden border border-neutral-200 bg-white"
         style={{ width, height, zIndex: isDragging ? 1 : 'auto' }}
       >
         {/*
@@ -109,7 +114,7 @@ const PrototypeFrame = memo(({ id, title, src, srcDoc, x, y, isDragging, onDragS
         {pins.map((pin) => (
           <div
             key={pin.id}
-            className="absolute w-6 h-6 bg-neutral-900 rounded-full shadow-[0_0_0_4px_rgba(0,0,0,0.2)] z-20 flex items-center justify-center border-2 border-white animate-in zoom-in duration-300"
+            className="absolute w-6 h-6 bg-brand-ink rounded-full shadow-[0_0_0_4px_rgba(26,25,30,0.2)] z-20 flex items-center justify-center border-2 border-white animate-in zoom-in duration-300"
             style={{ left: pin.x, top: pin.y, transform: 'translate(-50%, -50%)', pointerEvents: 'none' }}
           >
             <div className="w-1 h-1 bg-white rounded-full" />
@@ -173,7 +178,11 @@ const CanvasContent = ({ frames, onRailHit, onGestureStateChange, registerContro
         ref={innerRef}
         className="w-[10000px] h-[10000px] relative"
         style={{
-          backgroundImage: `radial-gradient(#d4d4d4 2px, transparent 2px)`,
+          backgroundColor: '#1C1C1C',
+          backgroundImage: [
+            'linear-gradient(to right, rgba(213,219,226,0.08) 1px, transparent 1px)',
+            'linear-gradient(to bottom, rgba(213,219,226,0.08) 1px, transparent 1px)',
+          ].join(', '),
           backgroundSize: '30px 30px',
           touchAction: 'none', // We own all gestures inside the canvas
         }}
@@ -221,6 +230,74 @@ export default function App() {
     <CommentsProvider>
       <AppInner />
     </CommentsProvider>
+  )
+}
+
+/**
+ * Tooltip — portaled into document.body so it escapes the toolbar's
+ * overflow-hidden Card and any other clipping ancestors. Positioned above
+ * the trigger because the toolbar is at the bottom of the viewport (most
+ * of the time — when the user has dragged the toolbar elsewhere, the
+ * tooltip still appears above the trigger).
+ *
+ * Uses React state with a 500ms delay so accidental cursor passes don't
+ * flash tooltips. The trigger position is captured at show time via
+ * getBoundingClientRect — `position: fixed` then anchors the tooltip in
+ * viewport coordinates.
+ */
+function Tooltip({ children, label }) {
+  const [coords, setCoords] = useState(null)
+  const triggerRef = useRef(null)
+  const timerRef = useRef(null)
+
+  const onEnter = () => {
+    clearTimeout(timerRef.current)
+    timerRef.current = setTimeout(() => {
+      const rect = triggerRef.current?.getBoundingClientRect()
+      if (rect) {
+        setCoords({ x: rect.left + rect.width / 2, y: rect.top })
+      }
+    }, 500)
+  }
+  const onLeave = () => {
+    clearTimeout(timerRef.current)
+    setCoords(null)
+  }
+
+  // Belt-and-braces: clear timer on unmount so stale callbacks don't
+  // try to set state after the component is gone.
+  useEffect(() => () => clearTimeout(timerRef.current), [])
+
+  return (
+    <>
+      <span
+        ref={triggerRef}
+        className="relative inline-flex shrink-0"
+        onMouseEnter={onEnter}
+        onMouseLeave={onLeave}
+      >
+        {children}
+      </span>
+      {coords
+        ? createPortal(
+            <div
+              role="tooltip"
+              style={{
+                position: 'fixed',
+                left: coords.x,
+                top: coords.y,
+                transform: 'translate(-50%, calc(-100% - 8px))',
+                pointerEvents: 'none',
+                zIndex: 9999,
+              }}
+              className="px-2 py-1 rounded-md bg-brand-ink text-white text-[10px] font-medium whitespace-nowrap shadow-lg"
+            >
+              {label}
+            </div>,
+            document.body
+          )
+        : null}
+    </>
   )
 }
 
@@ -293,31 +370,6 @@ function AppInner() {
     setIsGestureActive(active)
   }, [])
 
-  // Zoom buttons — anchored at viewport center, so they work even when the
-  // cursor is over an iframe (where pinch is blocked by the browser). This is
-  // the keyboard-free alternative to "hold Cmd and pinch" for Interact mode.
-  const zoomBy = useCallback((factor) => {
-    const c = controlsRef.current
-    if (!c) return
-    const componentEl = document.querySelector('.react-transform-component')
-    const t = componentEl?.style?.transform ?? ''
-    const m = t.match(/translate\(([^,]+)px,\s*([^)]+)px\)\s*scale\(([^)]+)\)/)
-    if (!m) return
-    const camX = parseFloat(m[1])
-    const camY = parseFloat(m[2])
-    const oldScale = parseFloat(m[3])
-    const newScale = Math.min(20, Math.max(0.01, oldScale * factor))
-    // Anchor zoom on viewport center so the visual center stays put.
-    const vw = window.innerWidth
-    const vh = window.innerHeight
-    const px = vw / 2
-    const py = vh / 2
-    const ratio = newScale / oldScale
-    const newX = px - (px - camX) * ratio
-    const newY = py - (py - camY) * ratio
-    c.setTransform(newX, newY, newScale, 200)
-  }, [])
-
   /**
    * Pan/zoom the canvas to center on a specific frame. Used when the user
    * clicks a frame header in the comment drawer — jump to the frame so they
@@ -346,7 +398,7 @@ function AppInner() {
     )
   }, [frames])
 
-  const figmaCursor = `url("data:image/svg+xml,%3Csvg width='24' height='24' viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M7 4.5L7 18.5L11 14.5L17 14.5L7 4.5Z' fill='black' stroke='white' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E"), auto`
+  const figmaCursor = `url("data:image/svg+xml,%3Csvg width='24' height='24' viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M7 4.5L7 18.5L11 14.5L17 14.5L7 4.5Z' fill='%231A191E' stroke='white' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E"), auto`
 
   // Single keyboard effect: spacebar pan + Shift tracking + recovery shortcuts + browser-zoom block.
   useEffect(() => {
@@ -748,6 +800,131 @@ function AppInner() {
     placeNewFrame({ title, srcDoc: html })
   }, [placeNewFrame])
 
+  /**
+   * Folder upload (Tier 2: Service Worker virtual filesystem).
+   *
+   * The SW lives at /preview-sw.js and serves /preview/<uuid>/* from the
+   * Cache API. Each upload gets its own UUID-scoped sandbox. We register
+   * the SW on mount so it's ready by the time the user picks a folder.
+   *
+   * On upload: processBundle finds the virtual root, injects <base> into
+   * HTML files so absolute asset paths resolve, sends the bundle to the SW,
+   * and we add a regular URL-mode frame pointing at /preview/<uuid>/index.html.
+   *
+   * The comments layer doesn't need changes — these frames are real URLs
+   * with their own contentWindow, so postMessage source-matching just works.
+   * If the bundle includes the canvas-comments snippet, route-scoped comments
+   * work too.
+   */
+  const folderInputRef = useRef(null)
+  const [folderUploadStatus, setFolderUploadStatus] = useState(null) // 'busy' | 'error' | null
+
+  // Add-dropdown state. The "Add" main button submits the URL form; the chevron
+  // next to it opens a menu with the file/folder upload options.
+  const [addMenuOpen, setAddMenuOpen] = useState(false)
+  const addMenuRef = useRef(null)
+  const addMenuTriggerRef = useRef(null) // anchor for the portaled menu
+  const [addMenuCoords, setAddMenuCoords] = useState(null)
+  useEffect(() => {
+    if (!addMenuOpen) return
+    const rect = addMenuTriggerRef.current?.getBoundingClientRect()
+    if (rect) {
+      // Anchor the menu to the right edge of the split button, opening upward.
+      setAddMenuCoords({ right: window.innerWidth - rect.right, bottom: window.innerHeight - rect.top })
+    }
+    const onClick = (e) => {
+      if (addMenuRef.current && !addMenuRef.current.contains(e.target)) {
+        setAddMenuOpen(false)
+      }
+    }
+    const onKey = (e) => {
+      if (e.key === 'Escape') setAddMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onClick)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onClick)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [addMenuOpen])
+
+  // Toolbar drag state. `toolbarPos` is null until the user first drags the
+  // toolbar — at which point we switch from the default centered-bottom
+  // anchor to absolute pixel coordinates. The drag handle is the Blackbird
+  // brand area at the left of the toolbar (grip icon + name).
+  const [toolbarPos, setToolbarPos] = useState(null) // null | {x, y}
+  const toolbarRef = useRef(null)
+  const toolbarDragOffsetRef = useRef(null)
+  const onToolbarDragStart = useCallback((e) => {
+    if (e.button !== 0) return
+    if (!toolbarRef.current) return
+    e.preventDefault()
+    const rect = toolbarRef.current.getBoundingClientRect()
+    toolbarDragOffsetRef.current = {
+      dx: e.clientX - rect.left,
+      dy: e.clientY - rect.top,
+    }
+    // Switch to pixel positioning at the current location so the toolbar
+    // doesn't jump on the first mousemove.
+    setToolbarPos({ x: rect.left, y: rect.top })
+  }, [])
+  useEffect(() => {
+    const onMove = (e) => {
+      const offset = toolbarDragOffsetRef.current
+      if (!offset) return
+      const tw = toolbarRef.current?.offsetWidth ?? 600
+      const th = toolbarRef.current?.offsetHeight ?? 56
+      // Keep the toolbar inside the viewport with a small margin.
+      const PAD = 8
+      const x = Math.min(Math.max(PAD, e.clientX - offset.dx), window.innerWidth - tw - PAD)
+      const y = Math.min(Math.max(PAD, e.clientY - offset.dy), window.innerHeight - th - PAD)
+      setToolbarPos({ x, y })
+    }
+    const onUp = () => {
+      toolbarDragOffsetRef.current = null
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [])
+
+  useEffect(() => {
+    // Kick off SW registration once on mount. Idempotent.
+    registerPreviewSW().catch((err) => {
+      console.warn('Preview SW registration failed:', err)
+    })
+  }, [])
+
+  const handleUploadFolder = useCallback(async (e) => {
+    // Snapshot files BEFORE resetting the input. `e.target.files` is a live
+    // FileList tied to the input element — `e.target.value = ''` empties it,
+    // so we have to materialize an independent array of File references first.
+    const files = Array.from(e.target.files || [])
+    e.target.value = ''
+    if (files.length === 0) return
+
+    setFolderUploadStatus('busy')
+    try {
+      // Make sure the SW is ready before we try to send it the bundle.
+      // First-time install racing the first upload would otherwise fail.
+      await registerPreviewSW()
+      const result = await uploadFolderBundle(files)
+      placeNewFrame({
+        title: result.displayTitle,
+        url: window.location.origin + result.previewURL,
+      })
+      setFolderUploadStatus(null)
+    } catch (err) {
+      console.error('Folder upload failed:', err)
+      alert('Could not upload folder: ' + (err?.message || err))
+      setFolderUploadStatus('error')
+      setTimeout(() => setFolderUploadStatus(null), 3000)
+    }
+  }, [placeNewFrame])
+
   // Wall-bump CSS — applied to a wrapper OUTSIDE TransformWrapper so it doesn't fight the library's transform.
   const bumpStyle = bumpAxis
     ? { transform: bumpAxis === 'max' ? 'scale(1.005)' : 'scale(0.995)', transition: 'transform 100ms cubic-bezier(0.4, 0, 0.2, 1)' }
@@ -772,15 +949,36 @@ function AppInner() {
     <div
       ref={rootRef}
       tabIndex={-1}
-      className="relative w-full h-screen bg-neutral-50 overflow-hidden outline-none"
+      className="relative w-full h-screen bg-[#1C1C1C] overflow-hidden outline-none"
       style={{ cursor }}
     >
-      {/* FLOATING TOOLBAR — single horizontal strip (Card defaults are flex-col + py-4; override here) */}
-      <div className="absolute top-6 left-1/2 -translate-x-1/2 z-[100] w-[95%] max-w-6xl">
-        <Card className="flex flex-row flex-nowrap items-center gap-3 px-3 py-2 shadow-xl border-neutral-200/60 bg-white/95 backdrop-blur-md">
-          <div className="font-bold text-xs tracking-tighter flex items-center gap-1.5 shrink-0 whitespace-nowrap">
-            <BlackbirdMark />
-            <span>Blackbird</span>
+      {/* FLOATING TOOLBAR.
+          - Default position: centered at the bottom of the viewport
+          - Once dragged: absolute pixel coordinates, clamped to viewport
+          - data-drawer-safe so the comments drawer's click-outside-to-close
+            logic ignores clicks within the toolbar */}
+      <div
+        ref={toolbarRef}
+        data-drawer-safe
+        className={
+          toolbarPos
+            ? 'absolute z-[100]'
+            : 'absolute bottom-6 left-1/2 -translate-x-1/2 z-[100] w-[98%] max-w-7xl'
+        }
+        style={toolbarPos ? { left: toolbarPos.x, top: toolbarPos.y } : undefined}
+      >
+        <Card className="flex flex-row flex-nowrap items-center gap-3 px-3 py-2 shadow-xl ring-0 bg-[#343434] text-neutral-200">
+          {/* Drag handle — grip icon + brand name. The whole strip is grabbable. */}
+          <div
+            onMouseDown={onToolbarDragStart}
+            className="font-bold text-base tracking-tighter flex items-center gap-1.5 shrink-0 whitespace-nowrap select-none cursor-grab active:cursor-grabbing -mr-1"
+            title="Drag to move toolbar"
+          >
+            <GripVertical className="size-3.5 text-neutral-400" aria-hidden strokeWidth={2} />
+            <div className="flex items-center gap-2.5">
+              <BlackbirdMark className="h-5 w-auto" />
+              <span className="text-neutral-400">Blackbird</span>
+            </div>
           </div>
 
           <form onSubmit={handleAddFrame} className="flex flex-1 min-w-0 items-center gap-2">
@@ -790,132 +988,207 @@ function AppInner() {
                 inputMode="url"
                 autoComplete="off"
                 spellCheck={false}
-                placeholder="Paste prototype URL..."
+                placeholder="Paste url"
                 value={newUrl}
                 onChange={(e) => setNewUrl(e.target.value)}
-                className="h-8 w-[85%] min-w-0 bg-neutral-100/50 border-neutral-200 focus-visible:ring-black/25 text-sm"
+                className="h-8 w-[85%] min-w-0 border-0 bg-neutral-800/90 text-neutral-300 placeholder:text-neutral-500 shadow-none focus-visible:border-0 focus-visible:ring-brand-ink/40 text-sm"
               />
             </div>
-            <Button type="submit" size="sm" className="hover:bg-neutral-900 h-8 px-3 text-xs shrink-0">
-              <Plus className="size-3.5 shrink-0" aria-hidden strokeWidth={2.5} />
-              Add
-            </Button>
+
             {/*
-              Upload HTML button — opens a native file picker, accepts a single
-              self-contained .html file, and adds it as a frame via `srcdoc`.
-              The hidden <input> is the real picker; the button just clicks it.
+              Split "Add" button.
+              Two raw <button>s (not Shadcn's Button) so the dimensions line
+              up exactly — using Shadcn's Button for one and a raw button for
+              the other produced a visual mismatch in the chevron's height.
+              The menu is portaled into body (next to the toolbar) because
+              the Card has overflow-hidden and would clip an absolute child.
             */}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".html,.htm,text/html"
-              onChange={handleUploadHtml}
-              style={{ display: 'none' }}
-              aria-hidden="true"
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              title="Upload a self-contained .html file as a new frame"
-              className="h-8 w-8 rounded-md bg-neutral-100 text-neutral-600 hover:bg-neutral-200 transition-colors shrink-0 flex items-center justify-center"
-            >
-              <Upload className="size-3.5" aria-hidden strokeWidth={2.5} />
-              <span className="sr-only">Upload HTML</span>
-            </button>
+            <div ref={addMenuRef} className="relative flex items-stretch shrink-0">
+              <button
+                ref={addMenuTriggerRef}
+                type="submit"
+                className="h-8 pl-3 pr-2.5 text-xs font-medium rounded-l-md bg-neutral-800/90 text-neutral-300 hover:bg-neutral-700 transition-colors flex items-center gap-1.5"
+              >
+                <Plus className="size-3.5 shrink-0" aria-hidden strokeWidth={2.5} />
+                Add
+              </button>
+              <button
+                type="button"
+                onClick={() => setAddMenuOpen((v) => !v)}
+                aria-haspopup="menu"
+                aria-expanded={addMenuOpen}
+                className={
+                  'h-8 w-7 rounded-r-md border-l border-white/10 text-neutral-300 transition-colors flex items-center justify-center ' +
+                  (addMenuOpen ? 'bg-neutral-700' : 'bg-neutral-800/90 hover:bg-neutral-700')
+                }
+              >
+                <ChevronDown
+                  className={'size-3.5 transition-transform ' + (addMenuOpen ? 'rotate-180' : '')}
+                  aria-hidden
+                  strokeWidth={2.5}
+                />
+                <span className="sr-only">More add options</span>
+              </button>
+
+              {/* Hidden file/folder inputs trigger the native pickers. */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".html,.htm,text/html"
+                onChange={handleUploadHtml}
+                style={{ display: 'none' }}
+                aria-hidden="true"
+              />
+              <input
+                ref={folderInputRef}
+                type="file"
+                webkitdirectory=""
+                directory=""
+                multiple
+                onChange={handleUploadFolder}
+                style={{ display: 'none' }}
+                aria-hidden="true"
+              />
+
+              {/* Portaled dropdown menu. Anchored relative to the trigger via
+                  computed coords so it floats above any overflow:hidden parent. */}
+              {addMenuOpen && addMenuCoords
+                ? createPortal(
+                    <div
+                      role="menu"
+                      style={{
+                        position: 'fixed',
+                        right: addMenuCoords.right,
+                        bottom: addMenuCoords.bottom + 6,
+                        zIndex: 9999,
+                      }}
+                      className="min-w-[180px] rounded-md border border-white/10 bg-[#343434] shadow-xl py-1 text-xs"
+                    >
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setAddMenuOpen(false)
+                          fileInputRef.current?.click()
+                        }}
+                        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-neutral-800/90 text-neutral-300 text-left"
+                      >
+                        <Upload className="size-3.5 shrink-0 text-neutral-500" aria-hidden strokeWidth={2} />
+                        Upload file
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setAddMenuOpen(false)
+                          folderInputRef.current?.click()
+                        }}
+                        disabled={folderUploadStatus === 'busy'}
+                        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-neutral-800/90 text-neutral-300 text-left disabled:opacity-50 disabled:cursor-wait"
+                      >
+                        <FolderUp className="size-3.5 shrink-0 text-neutral-500" aria-hidden strokeWidth={2} />
+                        Upload folder
+                        {folderUploadStatus === 'busy' ? (
+                          <span className="ml-auto text-amber-400 text-[10px]">working…</span>
+                        ) : null}
+                      </button>
+                    </div>,
+                    document.body
+                  )
+                : null}
+            </div>
           </form>
 
-          <div className="border-l border-neutral-100 pl-3 flex items-center gap-2 shrink-0 whitespace-nowrap">
-            {/*
-              Zoom buttons. Useful in Interact mode where pinching over an
-              iframe is captured by the iframe — these always work because
-              they're toolbar clicks, never wheel events.
-            */}
-            <button
-              type="button"
-              onClick={() => zoomBy(1 / 1.2)}
-              title="Zoom out"
-              className="h-7 w-7 rounded-md text-sm font-bold bg-neutral-100 text-neutral-600 hover:bg-neutral-200 transition-colors shrink-0"
-            >
-              −
-            </button>
-            <button
-              type="button"
-              onClick={() => zoomBy(1.2)}
-              title="Zoom in"
-              className="h-7 w-7 rounded-md text-sm font-bold bg-neutral-100 text-neutral-600 hover:bg-neutral-200 transition-colors shrink-0"
-            >
-              +
-            </button>
-            {/*
-              Comments. Two buttons:
-              - Comments [N] — opens the side drawer
-              - Place — enters placement mode (or press C); click a prototype to drop a pin
-            */}
-            <button
-              type="button"
-              onClick={() => setDrawerOpen(!drawerOpen)}
-              title="Open comments drawer"
-              className={
-                'h-7 px-2 rounded-md text-[10px] font-bold uppercase tracking-wide transition-colors shrink-0 ' +
-                (drawerOpen
-                  ? 'bg-neutral-900 text-white hover:bg-neutral-800'
-                  : 'bg-neutral-100 text-neutral-500 hover:bg-neutral-200')
-              }
-            >
-              Comments
-              {comments.length > 0 ? (
-                <span className="ml-1 opacity-75">{comments.length}</span>
-              ) : null}
-            </button>
-            <button
-              type="button"
-              onClick={toggleCommentMode}
-              title="Place a new comment (C) — click on a prototype to drop a pin"
-              className={
-                'h-7 px-2 rounded-md text-[10px] font-bold uppercase tracking-wide transition-colors shrink-0 ' +
-                (commentMode
-                  ? 'bg-orange-500 text-white hover:bg-orange-600'
-                  : 'bg-neutral-100 text-neutral-500 hover:bg-neutral-200')
-              }
-            >
-              Place
-            </button>
-            {/*
-              Interact toggle. Discoverable equivalent of the 'I' hotkey.
-              When active: amber fill, the shield is down, iframes are click-through.
-              When inactive: slim outline button, default canvas-navigation behavior.
-            */}
-            <button
-              type="button"
-              onClick={() => setIsInteractMode((v) => !v)}
-              title="Toggle Interact Mode (I) — let clicks reach prototypes. Hold ⌘/Ctrl while pinching to zoom over a prototype."
-              className={
-                'h-7 px-2 rounded-md text-[10px] font-bold uppercase tracking-wide transition-colors shrink-0 ' +
-                (isInteractMode
-                  ? 'bg-amber-500 text-white hover:bg-amber-600'
-                  : 'bg-neutral-100 text-neutral-500 hover:bg-neutral-200')
-              }
-            >
-              Interact
-            </button>
-            <div className={`h-2 w-2 rounded-full ${
-              commentMode ? 'bg-orange-500 animate-pulse'
-              : isSpacePressed ? 'bg-green-500 animate-pulse'
-              : isShiftPressed && !isGestureActive ? 'bg-neutral-900 animate-pulse'
-              : isInteractMode ? 'bg-amber-500 animate-pulse'
-              : 'bg-neutral-300'
-            }`} />
-            <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wide hidden sm:inline tabular-nums">
-              {commentMode
-                ? 'Place'
-                : isSpacePressed
-                  ? 'Pan Mode'
-                  : (isShiftPressed && !isGestureActive)
-                    ? 'Pin Mode'
-                    : isInteractMode
-                      ? 'Interact'
-                      : 'Pointer'}
-            </span>
+          <div className="border-l border-white/10 pl-3 flex items-center gap-2 shrink-0 whitespace-nowrap">
+            {/* Comments — icon-only with floating count badge. */}
+            <Tooltip label="Comments">
+              <button
+                type="button"
+                onClick={() => setDrawerOpen(!drawerOpen)}
+                className={
+                  'relative h-8 w-8 rounded-md transition-colors flex items-center justify-center ' +
+                  (drawerOpen
+                    ? 'bg-brand-ink text-white hover:bg-brand-ink-hover'
+                    : 'bg-neutral-800/90 text-neutral-300 hover:bg-neutral-700')
+                }
+              >
+                <MessageCircle className="size-4" aria-hidden strokeWidth={2} />
+                {comments.length > 0 ? (
+                  <span
+                    className="absolute -top-1.5 -right-1.5 min-w-[22px] h-[22px] px-1.5 rounded-md text-[10px] font-bold flex items-center justify-center ring-2 ring-[#343434] tabular-nums bg-blue-600 text-white"
+                  >
+                    {comments.length > 99 ? '99+' : comments.length}
+                  </span>
+                ) : null}
+                <span className="sr-only">Comments ({comments.length})</span>
+              </button>
+            </Tooltip>
+
+            {/* Place — pin icon. Enters comment placement mode (or press C). */}
+            <Tooltip label="Place a comment (C)">
+              <button
+                type="button"
+                onClick={toggleCommentMode}
+                className={
+                  'h-8 w-8 rounded-md transition-colors flex items-center justify-center ' +
+                  (commentMode
+                    ? 'bg-orange-500 text-white hover:bg-orange-600'
+                    : 'bg-neutral-800/90 text-neutral-300 hover:bg-neutral-700')
+                }
+              >
+                <MapPin className="size-4" aria-hidden strokeWidth={2} />
+                <span className="sr-only">Place comment</span>
+              </button>
+            </Tooltip>
+
+            {/* Interact — MousePointerClick icon. Toggles Interact Mode (I). */}
+            <Tooltip label="Interact mode (I)">
+              <button
+                type="button"
+                onClick={() => setIsInteractMode((v) => !v)}
+                className={
+                  'h-8 w-8 rounded-md transition-colors flex items-center justify-center ' +
+                  (isInteractMode
+                    ? 'bg-green-700 text-white hover:bg-green-800'
+                    : 'bg-neutral-800/90 text-neutral-300 hover:bg-neutral-700')
+                }
+              >
+                <MousePointerClick className="size-4" aria-hidden strokeWidth={2} />
+                <span className="sr-only">Interact mode</span>
+              </button>
+            </Tooltip>
+
+            <div className="ml-5 flex items-center gap-1.5 shrink-0">
+              <div
+                className={`h-2 w-2 shrink-0 rounded-full ${
+                  commentMode
+                    ? 'bg-orange-500 animate-pulse'
+                    : isSpacePressed
+                      ? 'bg-green-700 animate-pulse'
+                      : isShiftPressed && !isGestureActive
+                        ? 'bg-brand-ink animate-pulse'
+                        : isInteractMode
+                          ? 'bg-green-700 animate-pulse'
+                          : 'bg-neutral-300'
+                }`}
+              />
+              {/*
+                Status label. Fixed width (inline-block + w-[60px]) so its text
+                changing between modes ("Pointer" / "Pan Mode" / "Interact") doesn't
+                change the column width and shift the adjacent buttons around.
+              */}
+              <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wide hidden sm:inline-block w-[60px] tabular-nums">
+                {commentMode
+                  ? 'Place'
+                  : isSpacePressed
+                    ? 'Pan'
+                    : (isShiftPressed && !isGestureActive)
+                      ? 'Pin'
+                      : isInteractMode
+                        ? 'Interact'
+                        : 'Pointer'}
+              </span>
+            </div>
           </div>
         </Card>
       </div>
@@ -955,15 +1228,16 @@ function AppInner() {
           so it doesn't scale with zoom. */}
       <CommentDrawer frames={frames} onSelectFrame={panToFrame} />
 
-      {/* Placement-mode banner: helps the user know what to do next. */}
+      {/* Placement-mode banner: shown when in comment placement mode.
+          Placed at the TOP since the toolbar lives at the bottom. */}
       {commentMode ? (
         <div
           style={{
             position: 'fixed',
-            bottom: 24,
+            top: 24,
             left: '50%',
             transform: 'translateX(-50%)',
-            background: 'rgba(23, 23, 23, 0.92)',
+            background: 'rgba(26, 25, 30, 0.92)',
             color: 'white',
             padding: '8px 14px',
             borderRadius: 999,

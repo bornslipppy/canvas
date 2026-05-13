@@ -103,8 +103,8 @@ export function FramePins({ frameId, frameTitle }) {
               cursor: 'pointer',
               pointerEvents: 'auto',
               boxShadow: selected
-                ? '0 0 0 3px rgba(14,165,233,0.35), 0 4px 8px rgba(0,0,0,0.2)'
-                : '0 2px 6px rgba(0,0,0,0.2)',
+                ? '0 0 0 3px rgba(14,165,233,0.35), 0 4px 8px rgba(26, 25, 30, 0.2)'
+                : '0 2px 6px rgba(26, 25, 30, 0.2)',
               padding: 0,
               transition: 'transform 80ms ease',
               opacity: resolved ? 0.7 : 1,
@@ -132,7 +132,7 @@ export function FramePins({ frameId, frameTitle }) {
             lineHeight: '22px',
             textAlign: 'center',
             pointerEvents: 'none',
-            boxShadow: '0 0 0 3px rgba(14,165,233,0.45), 0 4px 8px rgba(0,0,0,0.2)',
+            boxShadow: '0 0 0 3px rgba(14,165,233,0.45), 0 4px 8px rgba(26, 25, 30, 0.2)',
             opacity: 0.95,
           }}
         >
