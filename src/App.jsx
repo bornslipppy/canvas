@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import { TransformWrapper, TransformComponent, useControls } from 'react-zoom-pan-pinch'
 
-import { Plus } from 'lucide-react'
+import { Plus, Upload } from 'lucide-react'
 
 // Import Shadcn Components
 import { Button } from "@/components/ui/button"
@@ -39,7 +39,7 @@ const FRAME_TOTAL_H = 750  // body + title gap
  * Memoized so an unrelated parent re-render doesn't re-render every frame —
  * critical for smooth drags, since the drag itself bypasses React state.
  */
-const PrototypeFrame = memo(({ id, title, src, x, y, isDragging, onDragStart, width = '1280px', height = '720px' }) => {
+const PrototypeFrame = memo(({ id, title, src, srcDoc, x, y, isDragging, onDragStart, width = '1280px', height = '720px' }) => {
   const [pins, setPins] = useState([])
 
   useEffect(() => {
@@ -78,12 +78,32 @@ const PrototypeFrame = memo(({ id, title, src, x, y, isDragging, onDragStart, wi
         className="relative shadow-2xl rounded-xl overflow-hidden border border-neutral-200 bg-white"
         style={{ width, height, zIndex: isDragging ? 1 : 'auto' }}
       >
-        <iframe
-          src={src}
-          className="w-full h-full border-none z-10"
-          title={title}
-          data-frame-id={id}
-        />
+        {/*
+          Two iframe modes:
+            - src: a remote URL (the original case — hosted prototypes)
+            - srcDoc: an inline HTML document (uploaded local .html files)
+          The comments layer doesn't care which one is in play: `data-frame-id`
+          is set either way, and the postMessage source-matching uses the
+          iframe's contentWindow regardless of origin. A srcDoc iframe whose
+          HTML includes the canvas-comments snippet still posts route events
+          correctly. Without the snippet, comments scope to frame-only — the
+          documented fallback for non-cooperating prototypes.
+        */}
+        {srcDoc ? (
+          <iframe
+            srcDoc={srcDoc}
+            className="w-full h-full border-none z-10"
+            title={title}
+            data-frame-id={id}
+          />
+        ) : (
+          <iframe
+            src={src}
+            className="w-full h-full border-none z-10"
+            title={title}
+            data-frame-id={id}
+          />
+        )}
         {/* Comment pins for THIS frame, scoped to its currently reported route. */}
         <FramePins frameId={id} frameTitle={title} />
         {pins.map((pin) => (
@@ -170,6 +190,7 @@ const CanvasContent = ({ frames, onRailHit, onGestureStateChange, registerContro
             id={frame.id}
             title={frame.title}
             src={frame.url}
+            srcDoc={frame.srcDoc}
             x={frame.x}
             y={frame.y}
             isDragging={draggingFrameId === frame.id}
@@ -621,27 +642,32 @@ function AppInner() {
     }
   }, [dragState])
 
-  const handleAddFrame = (e) => {
-    e.preventDefault()
-    const trimmed = newUrl.trim()
-    if (!trimmed) return
-
-    const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)
-    const url = hasScheme ? trimmed : `http://${trimmed}`
-
+  /**
+   * Place a new frame to the right of the rightmost existing one and pan the
+   * camera to it. Accepts either a URL (hosted prototype) or srcDoc (inline
+   * HTML for uploaded local files). Exactly one of `url` or `srcDoc` should
+   * be provided; the iframe rendering picks the right mode based on which
+   * field is set.
+   */
+  const placeNewFrame = useCallback(({ title, url, srcDoc }) => {
     setFrames((prev) => {
-      // Place the new frame to the right of the rightmost existing one.
       const GAP = 128
       const rightmostRight =
         prev.length > 0 ? Math.max(...prev.map((f) => f.x + FRAME_W)) : 5000 - FRAME_W / 2
       const newX = prev.length > 0 ? rightmostRight + GAP : 5000 - FRAME_W / 2
       const newY = prev.length > 0 ? prev[0].y : 5000 - FRAME_TOTAL_H / 2
 
-      const next = [
-        ...prev,
-        { id: `f-${Date.now()}`, url, title: `Frame ${prev.length + 1}`, x: newX, y: newY },
-      ]
+      const frame = {
+        id: `f-${Date.now()}`,
+        title: title || `Frame ${prev.length + 1}`,
+        url: url ?? '',
+        srcDoc: srcDoc ?? undefined,
+        x: newX,
+        y: newY,
+      }
+      const next = [...prev, frame]
 
+      // Pan camera to the new frame so the user sees what they just added.
       setTimeout(() => {
         const c = controlsRef.current
         if (!c) return
@@ -660,8 +686,67 @@ function AppInner() {
 
       return next
     })
+  }, [])
+
+  const handleAddFrame = (e) => {
+    e.preventDefault()
+    const trimmed = newUrl.trim()
+    if (!trimmed) return
+
+    const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)
+    const url = hasScheme ? trimmed : `http://${trimmed}`
+    placeNewFrame({ title: `Frame ${frames.length + 1}`, url })
     setNewUrl('')
   }
+
+  /**
+   * File upload (Tier 1: single self-contained .html file).
+   *
+   * Reads the file as text and stuffs the entire HTML into an `srcdoc` iframe.
+   * Works for HTML with inline CSS/JS or CDN references. Files that depend on
+   * sibling assets (local <script src="./app.js">, <link href="./styles.css">,
+   * <img src="./hero.png">) won't resolve — there's no base URL. That's a
+   * Tier 2 problem (Service Worker virtual filesystem) for later.
+   *
+   * Title defaults to filename without extension; user can rename later.
+   */
+  const fileInputRef = useRef(null)
+  const handleUploadHtml = useCallback(async (e) => {
+    const file = e.target.files?.[0]
+    // Reset the input so picking the same file twice still fires onChange.
+    e.target.value = ''
+    if (!file) return
+
+    // Sanity check on type/extension — `accept=".html"` is just a hint to the
+    // OS picker, not enforced. Be permissive: anything that parses as text and
+    // looks like HTML.
+    const isHtmlExt = /\.html?$/i.test(file.name)
+    const isHtmlMime = file.type === 'text/html' || file.type === ''
+    if (!isHtmlExt && !isHtmlMime) {
+      alert('Please choose an .html file.')
+      return
+    }
+
+    // Hard cap on size: srcDoc has to live in the React tree and serialize
+    // through any future persistence layer. 5MB is generous for hand-written
+    // HTML; bigger than that is probably an unrelated file.
+    const MAX_BYTES = 5 * 1024 * 1024
+    if (file.size > MAX_BYTES) {
+      alert(`File is ${(file.size / 1024 / 1024).toFixed(1)}MB — limit is 5MB for inline HTML.`)
+      return
+    }
+
+    let html
+    try {
+      html = await file.text()
+    } catch (err) {
+      alert('Could not read file: ' + (err?.message || err))
+      return
+    }
+
+    const title = file.name.replace(/\.html?$/i, '')
+    placeNewFrame({ title, srcDoc: html })
+  }, [placeNewFrame])
 
   // Wall-bump CSS — applied to a wrapper OUTSIDE TransformWrapper so it doesn't fight the library's transform.
   const bumpStyle = bumpAxis
@@ -715,6 +800,28 @@ function AppInner() {
               <Plus className="size-3.5 shrink-0" aria-hidden strokeWidth={2.5} />
               Add
             </Button>
+            {/*
+              Upload HTML button — opens a native file picker, accepts a single
+              self-contained .html file, and adds it as a frame via `srcdoc`.
+              The hidden <input> is the real picker; the button just clicks it.
+            */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".html,.htm,text/html"
+              onChange={handleUploadHtml}
+              style={{ display: 'none' }}
+              aria-hidden="true"
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              title="Upload a self-contained .html file as a new frame"
+              className="h-8 w-8 rounded-md bg-neutral-100 text-neutral-600 hover:bg-neutral-200 transition-colors shrink-0 flex items-center justify-center"
+            >
+              <Upload className="size-3.5" aria-hidden strokeWidth={2.5} />
+              <span className="sr-only">Upload HTML</span>
+            </button>
           </form>
 
           <div className="border-l border-neutral-100 pl-3 flex items-center gap-2 shrink-0 whitespace-nowrap">
