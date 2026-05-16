@@ -2,8 +2,18 @@
  * Service Worker registration for the preview virtual filesystem.
  *
  * Idempotent — call this on app mount. Returns a promise that resolves
- * when the SW is registered AND controlling the current page, so it's
- * safe to start uploading bundles afterward.
+ * to the SW registration once it's active and ready to receive messages.
+ *
+ * v2 note: this no longer waits for `navigator.serviceWorker.controller`
+ * to be set, because that observation is racy on first page-load (the SW
+ * activates and calls clients.claim(), but the `controllerchange` event
+ * can fire before any listener is attached, causing a forever-hang).
+ *
+ * Instead, we wait for `navigator.serviceWorker.ready` (which guarantees
+ * an active SW exists in scope), and send messages directly to
+ * `registration.active`. Fetch interception works for any in-scope
+ * navigation regardless of whether the original document is "controlled"
+ * — the iframe's first request loads under the SW automatically.
  */
 
 let readyPromise = null
@@ -11,41 +21,43 @@ let readyPromise = null
 export function registerPreviewSW() {
   if (readyPromise) return readyPromise
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
-    readyPromise = Promise.reject(new Error('Service Workers not supported in this browser'))
+    readyPromise = Promise.reject(
+      new Error('Service Workers not supported in this browser')
+    )
     return readyPromise
   }
 
   readyPromise = (async () => {
     // Register at root scope so /preview/* paths are interceptable.
-    // (The scope of the SW is implied by its URL, but we set it explicitly.)
     await navigator.serviceWorker.register('/preview-sw.js', { scope: '/' })
-
-    // navigator.serviceWorker.ready resolves once the active SW is installed.
-    // We additionally wait for the controller to be set, because the FIRST
-    // page-load after install doesn't have one yet (the SW activates but
-    // hasn't claimed the page — clients.claim() in the SW handles that, but
-    // there's still a tick of delay).
+    // navigator.serviceWorker.ready resolves once an SW is installed and
+    // active in scope. We do NOT additionally wait for `.controller`.
     const registration = await navigator.serviceWorker.ready
-
-    if (!navigator.serviceWorker.controller) {
-      await new Promise((resolve) => {
-        navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true })
-      })
+    if (!registration.active) {
+      throw new Error(
+        'Service Worker registered but registration.active is null. This shouldn\'t happen.'
+      )
     }
-
     return registration
   })()
   return readyPromise
 }
 
-/** Send a message to the active SW and await a typed reply over MessageChannel. */
-export function postToSW(message, expectedReplyType) {
+/**
+ * Send a message to the active SW and await a typed reply over MessageChannel.
+ *
+ * Uses `registration.active` rather than `navigator.serviceWorker.controller`
+ * so it works on the very first page-load (before the SW has claimed the
+ * document) as well as on subsequent loads.
+ */
+export async function postToSW(message, expectedReplyType) {
+  const registration = await registerPreviewSW()
+  const sw = registration.active
+  if (!sw) {
+    throw new Error('No active service worker — registration is broken')
+  }
+
   return new Promise((resolve, reject) => {
-    const sw = navigator.serviceWorker.controller
-    if (!sw) {
-      reject(new Error('No active service worker — call registerPreviewSW() first'))
-      return
-    }
     const channel = new MessageChannel()
     const timeout = setTimeout(() => {
       reject(new Error(`SW did not reply with ${expectedReplyType} within 30s`))
