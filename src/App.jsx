@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import { createPortal } from 'react-dom'
 import { TransformWrapper, TransformComponent, useControls } from 'react-zoom-pan-pinch'
 
-import { Plus, Upload, FolderUp, ChevronDown, MessageCircle, MapPin, MousePointerClick, GripVertical } from 'lucide-react'
+import { Plus, Upload, FolderUp, ChevronDown, ChevronLeft, ChevronRight, MessageCircle, MapPin, MousePointerClick, GripVertical } from 'lucide-react'
 
 // Import Shadcn Components
 import { Button } from "@/components/ui/button"
@@ -393,6 +393,61 @@ function AppInner() {
       400
     )
   }, [frames])
+
+  // ---------------- Frame navigation (PREV / NEXT / progress) ----------------
+  // currentFrameIndex points at the "active" frame for stepwise navigation:
+  //   - null  → nothing is active yet (e.g. empty canvas, or first load)
+  //   - 0..N-1 → index into the `frames` array (insertion order)
+  // We don't snap the user to a frame on first load — they explicitly engage by
+  // hitting Next/Prev or clicking a progress segment, at which point the index
+  // becomes meaningful. ArrowLeft/ArrowRight are global shortcuts (suppressed
+  // inside inputs and when modifiers are held, same convention as the rest of
+  // the keyboard map).
+  const [currentFrameIndex, setCurrentFrameIndex] = useState(null)
+
+  // Derived safe index: clamps to in-bounds at read time so we never have to
+  // sync state inside an effect when frames are added/removed. If the stored
+  // index points past the end (e.g. user deleted the active frame), this hides
+  // the staleness without rewriting state. Goes back to null when there are
+  // no frames at all.
+  const activeIndex = frames.length === 0
+    ? null
+    : currentFrameIndex === null
+      ? null
+      : Math.min(currentFrameIndex, frames.length - 1)
+
+  const goToFrameByIndex = useCallback((idx) => {
+    if (frames.length === 0) return
+    const clamped = Math.max(0, Math.min(frames.length - 1, idx))
+    setCurrentFrameIndex(clamped)
+    panToFrame(frames[clamped].id)
+  }, [frames, panToFrame])
+
+  // Arrow-key shortcuts for stepwise nav. Separate from the main keyboard
+  // effect so its deps can include the navigation state without forcing the
+  // main effect to re-bind on every frame change.
+  useEffect(() => {
+    if (frames.length === 0) return
+    const onKey = (e) => {
+      // Don't hijack arrows while typing in a field.
+      const tag = e.target.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      // Don't fight other shortcuts (Shift+arrows, Cmd+arrows, etc.)
+      if (e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return
+
+      if (e.key === 'ArrowRight') {
+        e.preventDefault()
+        const next = activeIndex === null ? 0 : activeIndex + 1
+        if (next < frames.length) goToFrameByIndex(next)
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault()
+        const prev = activeIndex === null ? 0 : activeIndex - 1
+        if (prev >= 0) goToFrameByIndex(prev)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [frames.length, activeIndex, goToFrameByIndex])
 
   const figmaCursor = `url("data:image/svg+xml,%3Csvg width='24' height='24' viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M7 4.5L7 18.5L11 14.5L17 14.5L7 4.5Z' fill='%231A191E' stroke='white' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E"), auto`
 
@@ -892,18 +947,30 @@ function AppInner() {
     if (!toolbarRef.current) return
     e.preventDefault()
     const rect = toolbarRef.current.getBoundingClientRect()
+    // Store pending drag state; don't commit toolbarPos yet so a plain click
+    // doesn't trigger the class swap and visual width change.
     toolbarDragOffsetRef.current = {
       dx: e.clientX - rect.left,
       dy: e.clientY - rect.top,
+      startX: e.clientX,
+      startY: e.clientY,
+      rect,
+      committed: false,
     }
-    // Switch to pixel positioning at the current location so the toolbar
-    // doesn't jump on the first mousemove.
-    setToolbarPos({ x: rect.left, y: rect.top })
   }, [])
   useEffect(() => {
     const onMove = (e) => {
       const offset = toolbarDragOffsetRef.current
       if (!offset) return
+      // Commit to pixel positioning only after a small movement threshold so
+      // a plain click never triggers the class swap (and width change).
+      if (!offset.committed) {
+        const dist = Math.hypot(e.clientX - offset.startX, e.clientY - offset.startY)
+        if (dist < 4) return
+        offset.committed = true
+        setToolbarPos({ x: offset.rect.left, y: offset.rect.top })
+        return
+      }
       const tw = toolbarRef.current?.offsetWidth ?? 600
       const th = toolbarRef.current?.offsetHeight ?? 56
       // Keep the toolbar inside the viewport with a small margin.
@@ -995,11 +1062,11 @@ function AppInner() {
         className={
           toolbarPos
             ? 'absolute z-[100]'
-            : 'absolute bottom-6 left-1/2 -translate-x-1/2 z-[100] w-[98%] max-w-7xl'
+            : 'absolute bottom-6 left-1/2 -translate-x-1/2 z-[100] w-[680px]'
         }
         style={toolbarPos ? { left: toolbarPos.x, top: toolbarPos.y } : undefined}
       >
-        <Card className="flex flex-row flex-nowrap items-center gap-3 px-3 py-2 shadow-xl ring-0 bg-[#343434] text-neutral-200">
+        <Card className="flex flex-row flex-nowrap items-center gap-3 px-3 py-2 shadow-xl ring-0 bg-[#343434]/60 backdrop-blur-md text-neutral-200">
           {/* Drag handle — grip icon + brand name. The whole strip is grabbable. */}
           <div
             onMouseDown={onToolbarDragStart}
@@ -1132,6 +1199,49 @@ function AppInner() {
                 : null}
             </div>
           </form>
+
+          {/* Frame navigation — PREV / NEXT joined as a unit + screens count.
+              Buttons sit flush (no gap between them) using rounded-l-md and
+              rounded-r-md on the outer edges only. Hidden when there are no
+              frames to navigate. */}
+          {frames.length > 0 ? (
+            <div className="border-l border-white/10 pl-3 flex items-center gap-2 shrink-0 whitespace-nowrap">
+              <div className="flex items-stretch">
+                <Tooltip label="Previous frame (←)">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const prev = activeIndex === null ? 0 : activeIndex - 1
+                      if (prev >= 0) goToFrameByIndex(prev)
+                    }}
+                    disabled={activeIndex === null || activeIndex <= 0}
+                    className="h-8 w-8 rounded-l-md bg-neutral-800/90 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
+                  >
+                    <ChevronLeft className="size-4" aria-hidden strokeWidth={2} />
+                    <span className="sr-only">Previous frame</span>
+                  </button>
+                </Tooltip>
+                <Tooltip label="Next frame (→)">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = activeIndex === null ? 0 : activeIndex + 1
+                      if (next < frames.length) goToFrameByIndex(next)
+                    }}
+                    disabled={activeIndex !== null && activeIndex >= frames.length - 1}
+                    className="h-8 w-8 rounded-r-md border-l border-white/10 bg-neutral-800/90 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
+                  >
+                    <ChevronRight className="size-4" aria-hidden strokeWidth={2} />
+                    <span className="sr-only">Next frame</span>
+                  </button>
+                </Tooltip>
+              </div>
+              <div className="flex items-baseline gap-1.5">
+                <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wide">Screens</span>
+                <span className="text-[12px] font-bold text-neutral-100 tabular-nums">{frames.length}</span>
+              </div>
+            </div>
+          ) : null}
 
           <div className="border-l border-white/10 pl-3 flex items-center gap-2 shrink-0 whitespace-nowrap">
             {/* Comments — icon-only with floating count badge. */}
