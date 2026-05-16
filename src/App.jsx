@@ -22,6 +22,7 @@ import { framePinColor } from './comments/frameColor'
 // Folder upload (Tier 2 — Service Worker virtual filesystem)
 import { registerPreviewSW } from './preview/registerSW'
 import { uploadFolderBundle } from './preview/processBundle'
+import { fetchGitHubBundle, isGithubRepoUrl } from './preview/fetchGitHubBundle'
 
 const FRAME_W = 1280
 const FRAME_H = 720
@@ -735,16 +736,50 @@ function AppInner() {
     })
   }, [])
 
-  const handleAddFrame = (e) => {
+  /**
+   * Submit handler for the URL form.
+   *
+   * Auto-detects GitHub repo URLs (github.com/{owner}/{repo}[/tree/...])
+   * and routes them through the GitHub fetcher → SW pipeline. Everything
+   * else is treated as a deployed URL and goes straight into an iframe
+   * frame, same as before.
+   *
+   * The user sees a single input field. Behavior switches under the hood
+   * based on URL shape — no UI mode toggle.
+   */
+  const [githubLoadStatus, setGithubLoadStatus] = useState(null) // 'busy' | 'error' | null
+
+  const handleAddFrame = useCallback(async (e) => {
     e.preventDefault()
     const trimmed = newUrl.trim()
     if (!trimmed) return
+
+    if (isGithubRepoUrl(trimmed)) {
+      setGithubLoadStatus('busy')
+      try {
+        await registerPreviewSW()
+        const { files, repo } = await fetchGitHubBundle(trimmed)
+        const result = await uploadFolderBundle(files)
+        placeNewFrame({
+          title: result.displayTitle || repo,
+          url: window.location.origin + result.previewURL,
+        })
+        setNewUrl('')
+        setGithubLoadStatus(null)
+      } catch (err) {
+        console.error('GitHub load failed:', err)
+        alert(err?.message || String(err))
+        setGithubLoadStatus('error')
+        setTimeout(() => setGithubLoadStatus(null), 3000)
+      }
+      return
+    }
 
     const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)
     const url = hasScheme ? trimmed : `http://${trimmed}`
     placeNewFrame({ title: `Frame ${frames.length + 1}`, url })
     setNewUrl('')
-  }
+  }, [newUrl, frames.length, placeNewFrame])
 
   /**
    * File upload (Tier 1: single self-contained .html file).
@@ -985,7 +1020,7 @@ function AppInner() {
                 inputMode="url"
                 autoComplete="off"
                 spellCheck={false}
-                placeholder="Paste url"
+                placeholder="Paste URL or GitHub repo"
                 value={newUrl}
                 onChange={(e) => setNewUrl(e.target.value)}
                 className="h-8 w-[85%] min-w-0 border-0 bg-neutral-800/90 text-neutral-300 placeholder:text-neutral-500 shadow-none focus-visible:border-0 focus-visible:ring-brand-ink/40 text-sm"
@@ -1004,10 +1039,11 @@ function AppInner() {
               <button
                 ref={addMenuTriggerRef}
                 type="submit"
-                className="h-8 pl-3 pr-2.5 text-xs font-medium rounded-l-md bg-neutral-800/90 text-neutral-300 hover:bg-neutral-700 transition-colors flex items-center gap-1.5"
+                disabled={githubLoadStatus === 'busy'}
+                className="h-8 pl-3 pr-2.5 text-xs font-medium rounded-l-md bg-neutral-800/90 text-neutral-300 hover:bg-neutral-700 transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-wait disabled:hover:bg-neutral-800/90"
               >
                 <Plus className="size-3.5 shrink-0" aria-hidden strokeWidth={2.5} />
-                Add
+                {githubLoadStatus === 'busy' ? 'Fetching…' : 'Add'}
               </button>
               <button
                 type="button"

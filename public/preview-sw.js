@@ -86,9 +86,21 @@ self.addEventListener('fetch', (event) => {
     return
   }
 
-  // Not under /preview/ — but might be an absolute-path asset that escaped
-  // its iframe scope. Look up the originating client and check.
-  event.respondWith(handlePossibleEscape(event, url))
+  // For non-/preview/ requests: only intercept if the requesting client
+  // is itself a /preview/ iframe trying to load an absolute-path asset
+  // that "escaped" its iframe scope. In every other case (canvas's own
+  // pages, dev-server HMR, etc.) we MUST NOT call event.respondWith()
+  // because re-fetching the request from inside the SW can fail with
+  // opaque TypeErrors (especially in dev mode), breaking the canvas itself.
+  //
+  // Determining this requires looking up the client by clientId, which
+  // we do synchronously below. If we can't get a client OR it isn't a
+  // preview iframe, we don't respond — letting the browser handle the
+  // request via the default network path.
+  const clientId = event.clientId || event.resultingClientId
+  if (!clientId) return
+
+  event.respondWith(handlePossibleEscape(event, url, clientId))
 })
 
 async function handlePreviewRequest(url) {
@@ -99,37 +111,56 @@ async function handlePreviewRequest(url) {
   return serveFromBundle(uuid, path)
 }
 
-async function handlePossibleEscape(event, url) {
+async function handlePossibleEscape(event, url, clientId) {
   let client = null
   try {
-    if (event.clientId) client = await self.clients.get(event.clientId)
+    client = await self.clients.get(clientId)
   } catch {
     /* ignore */
   }
-  if (!client) return fetch(event.request)
+  // If we can't identify the client, we shouldn't have been called —
+  // but as a safety net, fall through to the default network behavior.
+  // Do this by re-fetching with a fresh Request to avoid re-using the
+  // original (which can cause TypeErrors in some browsers/modes).
+  if (!client) {
+    try {
+      return await fetch(event.request)
+    } catch {
+      return new Response('Network error', { status: 502 })
+    }
+  }
 
   let clientURL
   try {
     clientURL = new URL(client.url)
   } catch {
-    return fetch(event.request)
+    return fetch(event.request).catch(() => new Response('Network error', { status: 502 }))
   }
-  if (clientURL.origin !== self.location.origin) return fetch(event.request)
+  if (clientURL.origin !== self.location.origin) {
+    return fetch(event.request).catch(() => new Response('Network error', { status: 502 }))
+  }
   const m = clientURL.pathname.match(/^\/preview\/([^/]+)\//)
-  if (!m) return fetch(event.request)
+  if (!m) {
+    // Client isn't a preview iframe — pass through. (Strictly we
+    // shouldn't have been called for this case, but guard anyway.)
+    return fetch(event.request).catch(() => new Response('Network error', { status: 502 }))
+  }
 
   // Request came from a preview iframe. Try the bundle's virtual root.
   const uuid = m[1]
-  const rewrittenURL = `/preview/${uuid}${url.pathname}`
   const cache = await caches.open(CACHE_PREFIX + uuid)
+  const rewrittenURL = `/preview/${uuid}${url.pathname}`
   const cached = await cache.match(rewrittenURL)
   if (cached) return cached
 
-  // Not in the bundle — fall through to the real network. This keeps
-  // canvas-app's own /assets/* etc. accessible (when accessed from the
-  // canvas-app itself, which is the more common case) and lets prototypes
-  // hit external APIs by absolute URL if they want.
-  return fetch(event.request)
+  // Vite/CRA `public/` convention fallback — same as serveFromBundle().
+  if (!url.pathname.startsWith('/public/')) {
+    const publicFallback = await cache.match(`/preview/${uuid}/public${url.pathname}`)
+    if (publicFallback) return publicFallback
+  }
+
+  // Not in the bundle — fall through to the real network.
+  return fetch(event.request).catch(() => new Response('Network error', { status: 502 }))
 }
 
 async function serveFromBundle(uuid, path) {
@@ -139,6 +170,15 @@ async function serveFromBundle(uuid, path) {
 
   let res = await cache.match(requestURL)
   if (res) return res
+
+  // Vite / CRA convention: files in `public/` are served at the root.
+  // If a request for /preview/<uuid>/foo.jsx misses, try
+  // /preview/<uuid>/public/foo.jsx. This lets repos with the standard
+  // `public/` layout work without per-repo configuration.
+  if (!path.startsWith('public/')) {
+    res = await cache.match(`/preview/${uuid}/public/${path}`)
+    if (res) return res
+  }
 
   // SPA fallback: extension-less paths fall through to index.html so
   // client-side routers work for routes that don't exist as real files.
