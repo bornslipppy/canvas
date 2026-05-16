@@ -1,0 +1,289 @@
+--- a/src/App.jsx	2026-05-12 12:48:36.596528943 +0000
++++ b/src/App.jsx	2026-05-12 12:50:01.768052291 +0000
+@@ -9,7 +9,7 @@
+ // Custom zoom pipeline
+ import { useFigmaZoom } from '@/hooks/useFigmaZoom'
+ 
+-const PrototypeFrame = ({ title, src, width = '1280px', height = '720px' }) => {
++const PrototypeFrame = ({ id, title, src, x, y, isDragging, onDragStart, width = '1280px', height = '720px' }) => {
+   const [pins, setPins] = useState([])
+ 
+   useEffect(() => {
+@@ -27,8 +27,15 @@
+   }, [])
+ 
+   return (
+-    <div className="flex flex-col gap-3">
+-      <h3 className="text-[12px] font-bold text-slate-500 ml-1 tracking-widest uppercase">
++    <div
++      className="absolute flex flex-col gap-3"
++      style={{ left: x, top: y }}
++    >
++      <h3
++        onMouseDown={(e) => onDragStart(e, id)}
++        className={`text-[12px] font-bold text-slate-500 ml-1 tracking-widest uppercase select-none ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
++        title="Drag to move this frame"
++      >
+         {title}
+       </h3>
+       <div
+@@ -59,7 +66,7 @@
+  *   - isGestureActive: true → shield up (a wheel/pinch gesture is in flight; don't let click-through happen)
+  * Together: shieldActive = !isShiftPressed || isGestureActive
+  */
+-const CanvasContent = ({ frames, onRailHit, onGestureStateChange, registerControls, shieldActive }) => {
++const CanvasContent = ({ frames, onRailHit, onGestureStateChange, registerControls, shieldActive, onFrameDragStart, draggingFrameId }) => {
+   const innerRef = useRef(null)
+   const controls = useControls()
+ 
+@@ -77,18 +84,31 @@
+     <TransformComponent wrapperStyle={{ width: "100%", height: "100%" }}>
+       <div
+         ref={innerRef}
+-        className="w-[10000px] h-[10000px] flex items-center justify-center relative"
++        className="w-[10000px] h-[10000px] relative"
+         style={{
+           backgroundImage: `radial-gradient(#cbd5e1 1px, transparent 1px)`,
+           backgroundSize: '30px 30px',
+           touchAction: 'none', // We own all gestures inside the canvas
+         }}
+       >
+-        <div className="flex gap-32 p-32">
+-          {frames.map((frame) => (
+-            <PrototypeFrame key={frame.id} title={frame.title} src={frame.url} />
+-          ))}
+-        </div>
++        {/*
++          Frames are absolutely positioned in canvas world space. Each carries
++          its own (x, y). Drag a frame's title to move it; the math accounts
++          for the current canvas scale so 1px of cursor motion equals (1/scale)px
++          of world motion.
++        */}
++        {frames.map((frame) => (
++          <PrototypeFrame
++            key={frame.id}
++            id={frame.id}
++            title={frame.title}
++            src={frame.url}
++            x={frame.x}
++            y={frame.y}
++            isDragging={draggingFrameId === frame.id}
++            onDragStart={onFrameDragStart}
++          />
++        ))}
+ 
+         {/*
+           Shift-drop shield.
+@@ -108,19 +128,39 @@
+ }
+ 
+ export default function App() {
+-  const [frames, setFrames] = useState([{ id: 'f1', url: 'http://localhost:5174', title: 'Desktop View' }])
++  // Frame world-space coords: top-left of the title+frame wrapper. Canvas is
++  // 10000x10000 with origin (0,0) at top-left, so center is (5000, 5000).
++  // FRAME_W = 1280, FRAME_H ≈ 750 (frame body + title + gap). Initial frame is
++  // placed centered.
++  const [frames, setFrames] = useState([{
++    id: 'f1',
++    url: 'http://localhost:5174',
++    title: 'Desktop View',
++    x: 5000 - 1280 / 2,
++    y: 5000 - 750 / 2,
++  }])
+   const [newUrl, setNewUrl] = useState('')
+   const [isSpacePressed, setIsSpacePressed] = useState(false)
+   const [isDragging, setIsDragging] = useState(false)
+ 
+-  // Shield composition: shield is UP unless Shift is held (transient pin intent)
+-  // OR Interact mode is on (sticky prototype-driving intent). A live gesture
+-  // always forces the shield back up so the iframe can't steal a wheel event
+-  // mid-pinch.
++  // Shield composition. Two competing forces:
++  //   clickthroughIntent (user wants iframe events): Shift held OR Interact mode on
++  //   canvasOverride     (canvas wins regardless):   gesture active OR Cmd/Ctrl held
++  // Shield is up unless clickthrough wins. canvasOverride trumps clickthrough.
++  // The Cmd/Ctrl override is what makes "pinch zoom over iframe in Interact mode" work:
++  // hold Cmd, shield raises, wheel reaches our hook, pinch zooms.
+   const [isShiftPressed, setIsShiftPressed] = useState(false)
+   const [isGestureActive, setIsGestureActive] = useState(false)
+   const [isInteractMode, setIsInteractMode] = useState(false)
+-  const shieldActive = isGestureActive || (!isShiftPressed && !isInteractMode)
++  const [isZoomModifierPressed, setIsZoomModifierPressed] = useState(false)
++  const clickthroughIntent = isShiftPressed || isInteractMode
++  const canvasOverride = isGestureActive || isZoomModifierPressed
++  const shieldActive = !clickthroughIntent || canvasOverride
++
++  // Frame drag state: null when no drag in progress, otherwise carries the frame
++  // being dragged + the cursor/frame positions at drag-start + the canvas scale
++  // captured at drag-start (so we don't fight a concurrent zoom during the drag).
++  const [dragState, setDragState] = useState(null)
+ 
+   // Wall-bump animation: 'min' or 'max' briefly when the user pushes past a zoom rail.
+   const [bumpAxis, setBumpAxis] = useState(null)
+@@ -151,9 +191,12 @@
+ 
+     const handleDown = (e) => {
+       // Track Shift regardless of focus — Shift+Click pin placement should work
+-      // even if the URL input was previously focused. (When typing in the input,
+-      // the click happens outside the input anyway, so this is harmless.)
++      // even if the URL input was previously focused.
+       if (e.key === 'Shift') setIsShiftPressed(true)
++      // Track Cmd/Ctrl as the zoom-modifier gate. Held outside a gesture, this
++      // raises the shield so wheel events can reach our hook — making pinch
++      // zoom work over an iframe in Interact mode.
++      if (e.key === 'Meta' || e.key === 'Control') setIsZoomModifierPressed(true)
+ 
+       const tag = e.target.tagName
+       const isInInput = tag === 'INPUT' || tag === 'TEXTAREA'
+@@ -210,13 +253,16 @@
+     const handleUp = (e) => {
+       if (e.key === 'Shift') setIsShiftPressed(false)
+       if (e.code === 'Space') setIsSpacePressed(false)
++      if (e.key === 'Meta' || e.key === 'Control') setIsZoomModifierPressed(false)
+     }
+ 
+-    // Defensive: if the window loses focus mid-gesture (alt-tab, etc.), clear modifier state
+-    // so the shield doesn't get stuck down.
++    // Defensive: if the window loses focus mid-gesture (alt-tab, etc.), clear
++    // transient modifier state so the shield/cursor don't get stuck. Interact
++    // mode is sticky and intentionally preserved across blur.
+     const handleBlur = () => {
+       setIsShiftPressed(false)
+       setIsSpacePressed(false)
++      setIsZoomModifierPressed(false)
+     }
+ 
+     window.addEventListener('wheel', preventBrowserZoom, { passive: false })
+@@ -232,6 +278,58 @@
+     }
+   }, [])
+ 
++  // ---------------- Frame dragging ----------------
++  // Drag a frame by its title. The drag math runs in canvas world space:
++  // 1px of cursor motion at viewport scale S = (1/S)px in world coords.
++
++  const handleFrameDragStart = (e, frameId) => {
++    // Prevent text selection on the title and stop the event reaching the
++    // canvas (where it might initiate a library-level pan).
++    e.preventDefault()
++    e.stopPropagation()
++    const frame = frames.find((f) => f.id === frameId)
++    if (!frame) return
++    // Read the current scale directly from the DOM transform — the library
++    // updates this synchronously on every wheel event so it's always fresh.
++    const wrapper = document.querySelector('.react-transform-component')
++    const t = wrapper?.style?.transform ?? ''
++    const m = t.match(/scale\(([^)]+)\)/)
++    const canvasScale = m ? parseFloat(m[1]) : 1
++    setDragState({
++      frameId,
++      startClientX: e.clientX,
++      startClientY: e.clientY,
++      frameStartX: frame.x,
++      frameStartY: frame.y,
++      canvasScale,
++    })
++  }
++
++  // Drag move/up listeners. Bound to `window` so the drag survives the cursor
++  // leaving the title element. Reattached when dragState changes (which is
++  // also how we tear down on drop).
++  useEffect(() => {
++    if (!dragState) return
++    const handleMove = (e) => {
++      const dxWorld = (e.clientX - dragState.startClientX) / dragState.canvasScale
++      const dyWorld = (e.clientY - dragState.startClientY) / dragState.canvasScale
++      setFrames((prev) =>
++        prev.map((f) =>
++          f.id === dragState.frameId
++            ? { ...f, x: dragState.frameStartX + dxWorld, y: dragState.frameStartY + dyWorld }
++            : f
++        )
++      )
++    }
++    const handleUp = () => setDragState(null)
++    window.addEventListener('mousemove', handleMove)
++    window.addEventListener('mouseup', handleUp)
++    return () => {
++      window.removeEventListener('mousemove', handleMove)
++      window.removeEventListener('mouseup', handleUp)
++    }
++  }, [dragState])
++
+   const handleAddFrame = (e) => {
+     e.preventDefault()
+     const trimmed = newUrl.trim()
+@@ -241,24 +339,25 @@
+     const url = hasScheme ? trimmed : `http://${trimmed}`
+ 
+     setFrames((prev) => {
+-      const next = [...prev, { id: `f-${Date.now()}`, url, title: `Frame ${prev.length + 1}` }]
++      // Place the new frame to the right of the rightmost existing one.
++      const FRAME_W = 1280
++      const FRAME_H = 750
++      const GAP = 128
++      const rightmostRight =
++        prev.length > 0 ? Math.max(...prev.map((f) => f.x + FRAME_W)) : 5000 - FRAME_W / 2
++      const newX = prev.length > 0 ? rightmostRight + GAP : 5000 - FRAME_W / 2
++      const newY = prev.length > 0 ? prev[0].y : 5000 - FRAME_H / 2
++
++      const next = [
++        ...prev,
++        { id: `f-${Date.now()}`, url, title: `Frame ${prev.length + 1}`, x: newX, y: newY },
++      ]
+ 
+       setTimeout(() => {
+         const c = controlsRef.current
+         if (!c) return
+-        // Each frame is 1280px wide. gap-32 = 128px. p-32 padding = 128px on each side.
+-        // The flex container is centered inside the 10000px canvas.
+-        const numFrames = next.length
+-        const FRAME_W = 1280
+-        const GAP = 128
+-        const PAD = 128
+-        const containerW = numFrames * FRAME_W + (numFrames - 1) * GAP + PAD * 2
+-        const canvasCenter = 5000 // 10000px / 2
+-        const containerLeft = canvasCenter - containerW / 2
+-        const newFrameIndex = numFrames - 1
+-        const frameCenterX = containerLeft + PAD + newFrameIndex * (FRAME_W + GAP) + FRAME_W / 2
+-        const frameCenterY = 5000
+-
++        const frameCenterX = newX + FRAME_W / 2
++        const frameCenterY = newY + FRAME_H / 2
+         const scale = 0.5
+         const vw = window.innerWidth
+         const vh = window.innerHeight
+@@ -281,14 +380,16 @@
+     : { transform: 'scale(1)', transition: 'transform 100ms cubic-bezier(0.4, 0, 0.2, 1)' }
+ 
+   // Cursor signals current mode at a glance.
+-  // Priority: pan (space) > pin-placement (shift, no gesture) > interact > default canvas cursor.
+-  const cursor = isSpacePressed
+-    ? (isDragging ? 'grabbing' : 'grab')
+-    : isShiftPressed && !isGestureActive
+-      ? 'crosshair'  // Shift is held and no gesture in flight → clicks will reach the iframe
+-      : isInteractMode
+-        ? 'default'  // Interact mode → arrow on canvas background; iframes show their own cursors
+-        : figmaCursor
++  // Priority: frame-drag > pan (space) > pin-placement (shift) > interact-passthrough > default.
++  const cursor = dragState
++    ? 'grabbing'  // dragging a frame — global grabbing cursor for clean feel
++    : isSpacePressed
++      ? (isDragging ? 'grabbing' : 'grab')
++      : isShiftPressed && !isGestureActive
++        ? 'crosshair'  // Shift is held and no gesture in flight → clicks will reach the iframe
++        : isInteractMode && !isZoomModifierPressed
++          ? 'default'  // Interact mode passthrough → let the iframe show its own cursor
++          : figmaCursor
+ 
+   return (
+     <div
+@@ -381,6 +482,8 @@
+             onGestureStateChange={handleGestureStateChange}
+             registerControls={registerControls}
+             shieldActive={shieldActive}
++            onFrameDragStart={handleFrameDragStart}
++            draggingFrameId={dragState?.frameId ?? null}
+           />
+         </TransformWrapper>
+       </div>
