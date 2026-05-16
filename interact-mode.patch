@@ -1,0 +1,101 @@
+--- a/src/App.jsx	2026-05-12 12:36:15.381880466 +0000
++++ b/src/App.jsx	2026-05-12 12:36:44.039011910 +0000
+@@ -113,10 +113,14 @@
+   const [isSpacePressed, setIsSpacePressed] = useState(false)
+   const [isDragging, setIsDragging] = useState(false)
+ 
+-  // Shield composition: drop the shield only when Shift is held AND no zoom gesture is in flight.
++  // Shield composition: shield is UP unless Shift is held (transient pin intent)
++  // OR Interact mode is on (sticky prototype-driving intent). A live gesture
++  // always forces the shield back up so the iframe can't steal a wheel event
++  // mid-pinch.
+   const [isShiftPressed, setIsShiftPressed] = useState(false)
+   const [isGestureActive, setIsGestureActive] = useState(false)
+-  const shieldActive = !isShiftPressed || isGestureActive
++  const [isInteractMode, setIsInteractMode] = useState(false)
++  const shieldActive = isGestureActive || (!isShiftPressed && !isInteractMode)
+ 
+   // Wall-bump animation: 'min' or 'max' briefly when the user pushes past a zoom rail.
+   const [bumpAxis, setBumpAxis] = useState(null)
+@@ -161,6 +165,24 @@
+         return
+       }
+ 
++      // 'I' → toggle Interact mode. Ignored inside inputs (early-returned above)
++      // so typing URLs containing 'i' doesn't flip the mode.
++      if (e.key === 'i' || e.key === 'I') {
++        // Don't toggle while a recovery-modifier is held (Shift+I, Cmd+I, etc.)
++        // so we don't fight with other shortcuts or accidental keystrokes.
++        if (e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return
++        e.preventDefault()
++        setIsInteractMode((v) => !v)
++        return
++      }
++
++      // Escape → exit Interact mode if active. Otherwise no-op (don't preventDefault,
++      // so Esc can still do native browser things like exiting fullscreen).
++      if (e.code === 'Escape') {
++        setIsInteractMode(false)
++        return
++      }
++
+       // Recovery shortcuts.
+       const c = controlsRef.current
+       if (!c) return
+@@ -259,12 +281,14 @@
+     : { transform: 'scale(1)', transition: 'transform 100ms cubic-bezier(0.4, 0, 0.2, 1)' }
+ 
+   // Cursor signals current mode at a glance.
+-  // Priority: pan (space) > pin-placement intent (shift) > default canvas cursor.
++  // Priority: pan (space) > pin-placement (shift, no gesture) > interact > default canvas cursor.
+   const cursor = isSpacePressed
+     ? (isDragging ? 'grabbing' : 'grab')
+     : isShiftPressed && !isGestureActive
+       ? 'crosshair'  // Shift is held and no gesture in flight → clicks will reach the iframe
+-      : figmaCursor
++      : isInteractMode
++        ? 'default'  // Interact mode → arrow on canvas background; iframes show their own cursors
++        : figmaCursor
+ 
+   return (
+     <div
+@@ -298,13 +322,38 @@
+           </form>
+ 
+           <div className="pr-2 border-l pl-4 border-slate-100 flex items-center gap-2 shrink-0">
++            {/*
++              Interact toggle. Discoverable equivalent of the 'I' hotkey.
++              When active: amber fill, the shield is down, iframes are click-through.
++              When inactive: slim outline button, default canvas-navigation behavior.
++            */}
++            <button
++              type="button"
++              onClick={() => setIsInteractMode((v) => !v)}
++              title="Toggle Interact Mode (I) — let clicks reach prototypes"
++              className={
++                'h-7 px-2.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-colors shrink-0 ' +
++                (isInteractMode
++                  ? 'bg-amber-500 text-white hover:bg-amber-600'
++                  : 'bg-slate-100 text-slate-500 hover:bg-slate-200')
++              }
++            >
++              Interact
++            </button>
+             <div className={`h-2 w-2 rounded-full ${
+               isSpacePressed ? 'bg-green-500 animate-pulse'
+               : isShiftPressed && !isGestureActive ? 'bg-sky-500 animate-pulse'
++              : isInteractMode ? 'bg-amber-500 animate-pulse'
+               : 'bg-slate-300'
+             }`} />
+             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest hidden md:block w-16">
+-              {isSpacePressed ? 'Pan Mode' : (isShiftPressed && !isGestureActive) ? 'Pin Mode' : 'Pointer'}
++              {isSpacePressed
++                ? 'Pan Mode'
++                : (isShiftPressed && !isGestureActive)
++                  ? 'Pin Mode'
++                  : isInteractMode
++                    ? 'Interact'
++                    : 'Pointer'}
+             </span>
+           </div>
+         </Card>

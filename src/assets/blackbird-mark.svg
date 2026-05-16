@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 89 50" width="89" height="50" role="img" aria-label="Blackbird mark">
+  <defs>
+    <mask id="blackbird-silhouette" mask-type="alpha" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="0" y="0" width="89" height="50">
+      <image width="89" height="50" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAFkAAAAyCAYAAAA3OHc2AAACV0lEQVR4AezbgVqDIBDAcerFWk9WPVnryYq/G0t2gjhQuXl9O0GGCj9vtL62V6f/59NP4bfjOGlHBvjDA/f6ePcDO2tGVgHskZ1WZDXAWpFrgM9+0l8+1nwMS8T4AtoyuQYYXAA4x4tHANwXTR+cX5xXEzI4Nb/kOH4s+jPeaVCfBOa8WpABqgFmric2K0USmOtpQG4BzFzHyNRrbxrnJLLAdOgduRUwcwWVP1q+/Q7hi+rHLDBX6Bm5JTBzDUEWh3pNWQTMBXpFFsAMVmv0iKwFmCWn6FXRG7IW4PCiYp0P9WTZE7I2YFDJZDKaejJ6QdYIHFCBZvxhX5Q9IDPAopedGH0/Ddnx7438DMDhVjOXUI/KPZEZVDYDopH2v5Ocy17IzwYcUoB5hfqt3AOZgSTv+m1kOiuT89oa+ZmBQ1rwbiPUh3JL5CMAO+ecyOatkI8CPGTu/WYL5KMBs1wQN+u1kY8GfIMdV9ZENuCr9FrIRwdefbk4OvA1f/+L1plswBfbt0tx2bZENuCLqdi2QjbgmDb64EwLZAOOgcVeLbIBC1LZUIO8HrAcp7aW6EOHjyIbcP62VyMbcB5YPLs0kw1YEIoGPgcdNS5BNuCILrkTLRX0KkU2YLTK4iFkAy7DpZdYKmicy2QDRqk88BK9c8gcIP5fJc5gDUFgMot5MoVswOgsC8wmj5hCprNl8CRXsjGZxRxxj2zAqBTH0JF3E7gNO1ObMTIdLYOnlPJtfHck2yMgG3CWKfnkLDBHgmzASCwP1mGWitkjAzLfNbZwbokByelKfv4AAAD//2eEJYgAAAAGSURBVAMACux9Zd5uMKIAAAAASUVORK5CYII=" />
+    </mask>
+  </defs>
+  <!-- Default fill matches app brand ink; override with CSS fill on root if needed -->
+  <g mask="url(#blackbird-silhouette)">
+    <rect width="89" height="50" fill="#1A191E" />
+  </g>
+  <!-- Eye highlight (aligned with BlackbirdMark.jsx: top ~11%, right ~16%, max 4px @ native 89px) -->
+  <circle cx="72.76" cy="7.5" r="2" fill="#FFFFFF" />
+</svg>
