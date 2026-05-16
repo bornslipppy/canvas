@@ -315,13 +315,8 @@ function AppInner() {
 
   // Frame world-space coords: top-left of the iframe body in canvas world space.
   // Canvas is 10000x10000 with origin (0,0) at top-left, so center is (5000, 5000).
-  const [frames, setFrames] = useState([{
-    id: 'f1',
-    url: 'http://localhost:5174',
-    title: 'Desktop View',
-    x: 5000 - FRAME_W / 2,
-    y: 5000 - FRAME_TOTAL_H / 2,
-  }])
+  // We start with no frames — the user adds them via "Add" / "Upload file" / "Upload folder".
+  const [frames, setFrames] = useState([])
   const [newUrl, setNewUrl] = useState('')
   const [isSpacePressed, setIsSpacePressed] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
@@ -823,6 +818,7 @@ function AppInner() {
   // next to it opens a menu with the file/folder upload options.
   const [addMenuOpen, setAddMenuOpen] = useState(false)
   const addMenuRef = useRef(null)
+  const addMenuPortalRef = useRef(null) // portaled menu lives outside addMenuRef
   const addMenuTriggerRef = useRef(null) // anchor for the portaled menu
   const [addMenuCoords, setAddMenuCoords] = useState(null)
   useEffect(() => {
@@ -833,9 +829,10 @@ function AppInner() {
       setAddMenuCoords({ right: window.innerWidth - rect.right, bottom: window.innerHeight - rect.top })
     }
     const onClick = (e) => {
-      if (addMenuRef.current && !addMenuRef.current.contains(e.target)) {
-        setAddMenuOpen(false)
-      }
+      const inTrigger = addMenuRef.current?.contains(e.target)
+      const inPortal = addMenuPortalRef.current?.contains(e.target)
+      if (inTrigger || inPortal) return
+      setAddMenuOpen(false)
     }
     const onKey = (e) => {
       if (e.key === 'Escape') setAddMenuOpen(false)
@@ -1055,6 +1052,7 @@ function AppInner() {
               {addMenuOpen && addMenuCoords
                 ? createPortal(
                     <div
+                      ref={addMenuPortalRef}
                       role="menu"
                       style={{
                         position: 'fixed',
