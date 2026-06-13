@@ -2,11 +2,9 @@ import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import { createPortal } from 'react-dom'
 import { TransformWrapper, TransformComponent, useControls } from 'react-zoom-pan-pinch'
 
-import { Plus, Upload, FolderUp, Package, ChevronDown, ChevronLeft, ChevronRight, MessageCircle, MapPin, MousePointerClick, GripVertical } from 'lucide-react'
+import { Plus, Upload, FolderUp, Package, ChevronLeft, ChevronRight, MessageCircle, MapPin, MousePointerClick, Maximize2 } from 'lucide-react'
 
 // Import Shadcn Components
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
 import { BlackbirdMark } from "@/components/BlackbirdMark"
 
@@ -31,6 +29,8 @@ import { fetchGitHubBundle, isGithubRepoUrl } from './preview/fetchGitHubBundle'
 const FRAME_W = 1280
 const FRAME_H = 720
 const FRAME_TOTAL_H = 750  // body + title gap
+const WORLD = 40000        // canvas world size (px). Large enough that content never leaves the grid.
+const CENTER = WORLD / 2    // world origin used for initial frame placement
 
 /**
  * Each prototype frame is absolutely positioned in canvas world space.
@@ -173,6 +173,11 @@ const CanvasContent = ({ frames, onRailHit, onGestureStateChange, registerContro
   useFigmaZoom(innerRef, {
     minScale: 0.01,
     maxScale: 20,
+    // Trackpad feel: faster two-finger pan, snappier pinch-zoom, shorter easing.
+    panSensitivity: 2.0,
+    zoomSensitivity: 0.02,    // snappier pinch-zoom
+    deltaClamp: 18,           // let bigger pinch deltas through (was 7) → more responsive
+    tau: 0.045,
     onRailHit,
     onGestureStateChange,
   })
@@ -181,8 +186,10 @@ const CanvasContent = ({ frames, onRailHit, onGestureStateChange, registerContro
     <TransformComponent wrapperStyle={{ width: "100%", height: "100%" }}>
       <div
         ref={innerRef}
-        className="w-[10000px] h-[10000px] relative"
+        className="relative"
         style={{
+          width: WORLD,
+          height: WORLD,
           backgroundColor: '#1C1C1C',
           backgroundImage: [
             'linear-gradient(to right, rgba(213,219,226,0.08) 1px, transparent 1px)',
@@ -322,7 +329,6 @@ function AppInner() {
   // Canvas is 10000x10000 with origin (0,0) at top-left, so center is (5000, 5000).
   // We start with no frames — the user adds them via "Add" / "Upload file" / "Upload folder".
   const [frames, setFrames] = useState([])
-  const [newUrl, setNewUrl] = useState('')
   const [isSpacePressed, setIsSpacePressed] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
 
@@ -355,6 +361,7 @@ function AppInner() {
   // Library's imperative controls for keyboard shortcuts.
   const controlsRef = useRef(null)
   const registerControls = useCallback((c) => { controlsRef.current = c }, [])
+  const fitRef = useRef(null) // latest fitAllFrames, so the keydown handler can call it
 
   // Ref to the root div — used to programmatically refocus the parent doc
   // after the user has interacted with an iframe (see handleMouseDown below).
@@ -525,10 +532,11 @@ function AppInner() {
         c.setTransform(0, 0, 1, 200)
         return
       }
-      // Cmd/Ctrl+0 → return to initial state
+      // Cmd/Ctrl+0 → fit all frames in the viewport (orientation / zoom-to-fit)
       if ((e.metaKey || e.ctrlKey) && e.code === 'Digit0') {
         e.preventDefault()
-        c.setTransform(0, 0, 0.5, 200)
+        if (fitRef.current) fitRef.current()
+        else c.setTransform(0, 0, 0.5, 200)
         return
       }
     }
@@ -763,9 +771,9 @@ function AppInner() {
     setFrames((prev) => {
       const GAP = 128
       const rightmostRight =
-        prev.length > 0 ? Math.max(...prev.map((f) => f.x + FRAME_W)) : 5000 - FRAME_W / 2
-      const newX = prev.length > 0 ? rightmostRight + GAP : 5000 - FRAME_W / 2
-      const newY = prev.length > 0 ? prev[0].y : 5000 - FRAME_TOTAL_H / 2
+        prev.length > 0 ? Math.max(...prev.map((f) => f.x + FRAME_W)) : CENTER - FRAME_W / 2
+      const newX = prev.length > 0 ? rightmostRight + GAP : CENTER - FRAME_W / 2
+      const newY = prev.length > 0 ? prev[0].y : CENTER - FRAME_TOTAL_H / 2
 
       const frame = {
         id,
@@ -812,9 +820,8 @@ function AppInner() {
    */
   const [githubLoadStatus, setGithubLoadStatus] = useState(null) // 'busy' | 'error' | null
 
-  const handleAddFrame = useCallback(async (e) => {
-    e.preventDefault()
-    const trimmed = newUrl.trim()
+  const addFromUrl = useCallback(async (raw) => {
+    const trimmed = (raw || '').trim()
     if (!trimmed) return
 
     if (isGithubRepoUrl(trimmed)) {
@@ -827,7 +834,6 @@ function AppInner() {
           title: result.displayTitle || repo,
           url: window.location.origin + result.previewURL,
         })
-        setNewUrl('')
         setGithubLoadStatus(null)
       } catch (err) {
         console.error('GitHub load failed:', err)
@@ -841,8 +847,7 @@ function AppInner() {
     const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)
     const url = hasScheme ? trimmed : `http://${trimmed}`
     placeNewFrame({ title: `Frame ${frames.length + 1}`, url })
-    setNewUrl('')
-  }, [newUrl, frames.length, placeNewFrame])
+  }, [frames.length, placeNewFrame])
 
   /**
    * File upload (Tier 1: single self-contained .html file).
@@ -1036,21 +1041,89 @@ function AppInner() {
   // frames, and remember the prototype's frame id so HandoffPanel can bind to it.
   const [handoffManifest, setHandoffManifest] = useState(null)
   const [handoffProtoId, setHandoffProtoId] = useState(null)
+  const [handoffArtifacts, setHandoffArtifacts] = useState([])
+  const [handoffPanelOpen, setHandoffPanelOpen] = useState(true)
+  const [handoffScreenSids, setHandoffScreenSids] = useState({}) // frameId → sid (per-screen)
+  const [handoffActiveSid, setHandoffActiveSid] = useState(null) // selected screen in the drawer
+  const [handoffInspect, setHandoffInspect] = useState(null)     // alt-clicked element's computed styles
   const packageInputRef = useRef(null)
 
+  // Click-to-select: clicking a live screen frame (Interact mode) focuses its
+  // iframe; on the resulting window blur we read document.activeElement, map the
+  // focused frame back to its sid, and select it in the drawer.
+  // Also: a live frame posts PROTOTYPE_INSPECT when the user Alt-clicks an element
+  // (Chrome-style inspect); we surface its computed styles in the drawer.
+  useEffect(() => {
+    if (!handoffManifest) return
+    const onBlur = () => {
+      setTimeout(() => {
+        const ae = document.activeElement
+        if (ae && ae.tagName === 'IFRAME') {
+          const sid = handoffScreenSids[ae.getAttribute('data-frame-id')]
+          if (sid) { setHandoffActiveSid(sid); setHandoffPanelOpen(true) }
+        }
+      }, 0)
+    }
+    const onMsg = (e) => {
+      if (e.data?.type === 'PROTOTYPE_INSPECT' && e.data.info) {
+        setHandoffInspect(e.data.info)
+        setHandoffPanelOpen(true)
+      }
+    }
+    window.addEventListener('blur', onBlur)
+    window.addEventListener('message', onMsg)
+    return () => { window.removeEventListener('blur', onBlur); window.removeEventListener('message', onMsg) }
+  }, [handoffManifest, handoffScreenSids])
+
+  // Clicking a screen in the drawer's list pans/zooms the board to that frame.
+  const focusScreen = useCallback((sid) => {
+    const fid = Object.keys(handoffScreenSids).find((k) => handoffScreenSids[k] === sid)
+    if (fid) panToFrame(fid)
+  }, [handoffScreenSids, panToFrame])
+
+  // Fit ALL frames in the viewport (Cmd/Ctrl+0, or the Fit button). Reserves the
+  // right side when the handoff panel is open so the board centers in the visible area.
+  const fitAllFrames = useCallback(() => {
+    const c = controlsRef.current
+    if (!c || frames.length === 0) return
+    const minX = Math.min(...frames.map((f) => f.x))
+    const minY = Math.min(...frames.map((f) => f.y - 36)) // include the title above each frame
+    const maxX = Math.max(...frames.map((f) => f.x + FRAME_W))
+    const maxY = Math.max(...frames.map((f) => f.y + FRAME_TOTAL_H))
+    const contentW = maxX - minX
+    const contentH = maxY - minY
+    const PAD = 80
+    const reserveRight = handoffManifest ? 440 : 0
+    const vw = window.innerWidth - reserveRight
+    const vh = window.innerHeight
+    const scale = Math.max(0.05, Math.min(1, (vw - PAD * 2) / contentW, (vh - PAD * 2) / contentH))
+    const ccx = (minX + maxX) / 2
+    const ccy = (minY + maxY) / 2
+    c.setTransform(vw / 2 - ccx * scale, vh / 2 - ccy * scale, scale, 320)
+  }, [frames, handoffManifest])
+  useEffect(() => { fitRef.current = fitAllFrames }, [fitAllFrames])
+
   const handleOpenPackage = useCallback(async (e) => {
-    const fileList = e.target.files
+    // Materialize the FileList BEFORE clearing the input: `e.target.files` is
+    // live and `e.target.value = ''` empties it (same gotcha as handleUploadFolder).
+    const files = Array.from(e.target.files || [])
     e.target.value = ''
-    if (!fileList || fileList.length === 0) return
+    if (files.length === 0) return
     try {
-      const { manifest, frames } = await loadHandoffPackage(fileList)
+      const { manifest, frames, artifacts } = await loadHandoffPackage(files)
       let protoId = null
+      const screenSids = {}
       for (const f of frames) {
-        const id = placeNewFrame(f.place)            // prototype first, then artifacts
+        const id = placeNewFrame(f.place)            // prototype/screens first, then artifacts
         if (f.role === 'prototype') protoId = id
+        if (f.role === 'screen' && f.meta?.sid) screenSids[id] = f.meta.sid  // frameId → sid
       }
       setHandoffManifest(manifest)
       setHandoffProtoId(protoId)
+      setHandoffArtifacts(artifacts || [])
+      setHandoffScreenSids(screenSids)
+      setHandoffActiveSid(null)
+      setHandoffPanelOpen(true)
     } catch (err) {
       console.error('[handoff] open failed:', err)
       alert(err?.message || String(err))
@@ -1095,73 +1168,37 @@ function AppInner() {
         className={
           toolbarPos
             ? 'absolute z-[100]'
-            : 'absolute bottom-6 left-1/2 -translate-x-1/2 z-[100] w-[680px]'
+            : 'absolute bottom-3 left-1/2 -translate-x-1/2 z-[100]'
         }
         style={toolbarPos ? { left: toolbarPos.x, top: toolbarPos.y } : undefined}
       >
-        <Card className="flex flex-row flex-nowrap items-center gap-3 px-3 py-2 shadow-xl ring-0 bg-[#343434]/60 backdrop-blur-md text-neutral-200">
+        <Card className="flex flex-row flex-nowrap items-center gap-1.5 px-1.5 py-1.5 shadow-xl ring-0 bg-[#343434]/60 backdrop-blur-md text-neutral-200">
           {/* Drag handle — grip icon + brand name. The whole strip is grabbable. */}
           <div
             onMouseDown={onToolbarDragStart}
-            className="font-bold text-base tracking-tighter flex items-center gap-1.5 shrink-0 whitespace-nowrap select-none cursor-grab active:cursor-grabbing -mr-1"
+            className="flex items-center shrink-0 select-none cursor-grab active:cursor-grabbing px-0.5"
             title="Drag to move toolbar"
           >
-            <GripVertical className="size-3.5 text-neutral-400" aria-hidden strokeWidth={2} />
-            <div className="flex items-center gap-2.5">
-              <BlackbirdMark className="h-5 w-auto" />
-              <span className="text-neutral-400">Blackbird</span>
-            </div>
+            <BlackbirdMark className="h-5 w-auto" />
           </div>
 
-          <form onSubmit={handleAddFrame} className="flex flex-1 min-w-0 items-center gap-2">
-            <div className="flex min-w-0 flex-1 items-center justify-end">
-              <Input
-                type="text"
-                inputMode="url"
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="Paste URL or GitHub repo"
-                value={newUrl}
-                onChange={(e) => setNewUrl(e.target.value)}
-                className="h-8 w-[85%] min-w-0 border-0 bg-neutral-800/90 text-neutral-300 placeholder:text-neutral-500 shadow-none focus-visible:border-0 focus-visible:ring-brand-ink/40 text-sm"
-              />
-            </div>
-
-            {/*
-              Split "Add" button.
-              Two raw <button>s (not Shadcn's Button) so the dimensions line
-              up exactly — using Shadcn's Button for one and a raw button for
-              the other produced a visual mismatch in the chevron's height.
-              The menu is portaled into body (next to the toolbar) because
-              the Card has overflow-hidden and would clip an absolute child.
-            */}
-            <div ref={addMenuRef} className="relative flex items-stretch shrink-0">
-              <button
-                ref={addMenuTriggerRef}
-                type="submit"
-                disabled={githubLoadStatus === 'busy'}
-                className="h-8 pl-3 pr-2.5 text-xs font-medium rounded-l-md bg-neutral-800/90 text-neutral-300 hover:bg-neutral-700 transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-wait disabled:hover:bg-neutral-800/90"
-              >
-                <Plus className="size-3.5 shrink-0" aria-hidden strokeWidth={2.5} />
-                {githubLoadStatus === 'busy' ? 'Fetching…' : 'Add'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setAddMenuOpen((v) => !v)}
-                aria-haspopup="menu"
-                aria-expanded={addMenuOpen}
-                className={
-                  'h-8 w-7 rounded-r-md border-l border-white/10 text-neutral-300 transition-colors flex items-center justify-center ' +
-                  (addMenuOpen ? 'bg-neutral-700' : 'bg-neutral-800/90 hover:bg-neutral-700')
-                }
-              >
-                <ChevronDown
-                  className={'size-3.5 transition-transform ' + (addMenuOpen ? 'rotate-180' : '')}
-                  aria-hidden
-                  strokeWidth={2.5}
-                />
-                <span className="sr-only">More add options</span>
-              </button>
+          <div ref={addMenuRef} className="relative shrink-0">
+            <button
+              ref={addMenuTriggerRef}
+              type="button"
+              onClick={() => setAddMenuOpen((v) => !v)}
+              disabled={githubLoadStatus === 'busy'}
+              aria-haspopup="menu"
+              aria-expanded={addMenuOpen}
+              title="Add"
+              className={
+                'h-8 w-8 rounded-md text-neutral-300 transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-wait ' +
+                (addMenuOpen ? 'bg-neutral-700' : 'bg-neutral-800/90 hover:bg-neutral-700')
+              }
+            >
+              <Plus className="size-4" aria-hidden strokeWidth={2.5} />
+              <span className="sr-only">Add</span>
+            </button>
 
               {/* Hidden file/folder inputs trigger the native pickers. */}
               <input
@@ -1213,6 +1250,23 @@ function AppInner() {
                         role="menuitem"
                         onClick={() => {
                           setAddMenuOpen(false)
+                          const u = window.prompt('Paste a URL or GitHub repo')
+                          if (u) addFromUrl(u)
+                        }}
+                        disabled={githubLoadStatus === 'busy'}
+                        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-neutral-800/90 text-neutral-300 text-left disabled:opacity-50 disabled:cursor-wait"
+                      >
+                        <Plus className="size-3.5 shrink-0 text-neutral-500" aria-hidden strokeWidth={2} />
+                        Add URL or GitHub
+                        {githubLoadStatus === 'busy' ? (
+                          <span className="ml-auto text-amber-400 text-[10px]">working…</span>
+                        ) : null}
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setAddMenuOpen(false)
                           fileInputRef.current?.click()
                         }}
                         className="w-full flex items-center gap-2 px-3 py-2 hover:bg-neutral-800/90 text-neutral-300 text-left"
@@ -1253,14 +1307,13 @@ function AppInner() {
                   )
                 : null}
             </div>
-          </form>
 
           {/* Frame navigation — PREV / NEXT joined as a unit + screens count.
               Buttons sit flush (no gap between them) using rounded-l-md and
               rounded-r-md on the outer edges only. Hidden when there are no
               frames to navigate. */}
           {frames.length > 0 ? (
-            <div className="border-l border-white/10 pl-3 flex items-center gap-2 shrink-0 whitespace-nowrap">
+            <div className="flex items-center gap-1 shrink-0 whitespace-nowrap">
               <div className="flex items-stretch">
                 <Tooltip label="Previous frame (←)">
                   <button
@@ -1291,14 +1344,20 @@ function AppInner() {
                   </button>
                 </Tooltip>
               </div>
-              <div className="flex items-baseline gap-1.5">
-                <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wide">Screens</span>
-                <span className="text-[12px] font-bold text-neutral-100 tabular-nums">{frames.length}</span>
-              </div>
+              <Tooltip label="Fit all (⌘0)">
+                <button
+                  type="button"
+                  onClick={fitAllFrames}
+                  className="h-8 w-8 rounded-md bg-neutral-800/90 text-neutral-300 hover:bg-neutral-700 transition-colors flex items-center justify-center"
+                >
+                  <Maximize2 className="size-4" aria-hidden strokeWidth={2} />
+                  <span className="sr-only">Fit all frames</span>
+                </button>
+              </Tooltip>
             </div>
           ) : null}
 
-          <div className="border-l border-white/10 pl-3 flex items-center gap-2 shrink-0 whitespace-nowrap">
+          <div className="flex items-center gap-1 shrink-0 whitespace-nowrap">
             {/* Comments — icon-only with floating count badge. */}
             <Tooltip label="Comments">
               <button
@@ -1357,37 +1416,6 @@ function AppInner() {
               </button>
             </Tooltip>
 
-            <div className="ml-5 flex items-center gap-1.5 shrink-0">
-              <div
-                className={`h-2 w-2 shrink-0 rounded-full ${
-                  commentMode
-                    ? 'bg-orange-500 animate-pulse'
-                    : isSpacePressed
-                      ? 'bg-green-700 animate-pulse'
-                      : isShiftPressed && !isGestureActive
-                        ? 'bg-brand-ink animate-pulse'
-                        : isInteractMode
-                          ? 'bg-green-700 animate-pulse'
-                          : 'bg-neutral-300'
-                }`}
-              />
-              {/*
-                Status label. Fixed width (inline-block + w-[60px]) so its text
-                changing between modes ("Pointer" / "Pan Mode" / "Interact") doesn't
-                change the column width and shift the adjacent buttons around.
-              */}
-              <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wide hidden sm:inline-block w-[60px] tabular-nums">
-                {commentMode
-                  ? 'Place'
-                  : isSpacePressed
-                    ? 'Pan'
-                    : (isShiftPressed && !isGestureActive)
-                      ? 'Pin'
-                      : isInteractMode
-                        ? 'Interact'
-                        : 'Pointer'}
-              </span>
-            </div>
           </div>
         </Card>
       </div>
@@ -1399,6 +1427,9 @@ function AppInner() {
           minScale={0.01}
           maxScale={20}
           centerOnInit
+          // Bounds stay ON (the WORLD is large enough to hold all frames + margin);
+          // turning them off let the camera drift outside the grid into a region
+          // with no wheel surface, which broke swipe and destabilized pinch.
           // Library's wheel handler is fully disabled — we own wheel via useFigmaZoom.
           wheel={{ disabled: true }}
           // Drag-pan is still owned by the library, gated by spacebar.
@@ -1464,15 +1495,35 @@ function AppInner() {
 
       {/* Handoff spec panel — rendered once a package is loaded; follows the
           live prototype's navigation. Self-contained fixed panel on the right. */}
-      {handoffManifest ? (
+      {handoffManifest && handoffPanelOpen ? (
         <HandoffPanel
           manifest={handoffManifest}
           prototypeFrameId={handoffProtoId}
-          onClose={() => {
-            setHandoffManifest(null)
-            setHandoffProtoId(null)
-          }}
+          artifacts={handoffArtifacts}
+          activeSid={handoffActiveSid}
+          onSelectSid={setHandoffActiveSid}
+          onFocusScreen={focusScreen}
+          inspect={handoffInspect}
+          onClearInspect={() => setHandoffInspect(null)}
+          onClose={() => setHandoffPanelOpen(false)}
         />
+      ) : null}
+
+      {/* Reopen affordance — closing the panel hides it (keeps the binding alive)
+          instead of unloading the package. */}
+      {handoffManifest && !handoffPanelOpen ? (
+        <button
+          onClick={() => setHandoffPanelOpen(true)}
+          style={{
+            position: 'fixed', top: 16, right: 16, zIndex: 10000,
+            padding: '8px 14px', borderRadius: 9, border: '1px solid rgba(255,255,255,.14)',
+            background: 'rgba(28,28,30,.92)', color: '#fff', cursor: 'pointer',
+            font: '13px/1 ui-sans-serif,system-ui', backdropFilter: 'blur(8px)',
+          }}
+          title="Show the handoff spec panel"
+        >
+          Spec ▸
+        </button>
       ) : null}
     </div>
   )

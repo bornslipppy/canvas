@@ -77,17 +77,41 @@ export async function loadHandoffPackage(fileList) {
     // srcDoc below, so that's fine.
     await registerPreviewSW()
     const result = await uploadFolderBundle(files)
-    frames.push({
-      role: 'prototype',
-      place: {
-        title: manifest.package?.name || result.displayTitle || 'Prototype',
-        url: window.location.origin + result.previewURL,
-      },
-      meta: { emitsRoute: proto.emitsRoute !== false, uuid: result.uuid },
-    })
+    const baseUrl = window.location.origin + result.previewURL
+
+    if (manifest.layout === 'per-screen' && Array.isArray(manifest.screens) && manifest.screens.length) {
+      // Slice the prototype into one LIVE frame per screen. Each frame loads the
+      // same served prototype but with `#sid=<id>` in the URL, so the prototype's
+      // applySid() boots it straight into that state. The flow becomes a board of
+      // live, interactive screens — Dev-Mode-for-live-prototypes.
+      for (const s of manifest.screens) {
+        frames.push({
+          role: 'screen',
+          place: {
+            title: `${s.sid} · ${s.title || ''}`.trim(),
+            url: `${baseUrl}#sid=${encodeURIComponent(s.stateMatch ?? s.sid)}`,
+          },
+          meta: { sid: s.sid, uuid: result.uuid },
+        })
+      }
+    } else {
+      frames.push({
+        role: 'prototype',
+        place: {
+          title: manifest.package?.name || result.displayTitle || 'Prototype',
+          url: baseUrl,
+        },
+        meta: { emitsRoute: proto.emitsRoute !== false, uuid: result.uuid },
+      })
+    }
   }
 
-  // 3. Artifact frames (flow.html, inspect.html, markdown specs).
+  // 3. Artifacts (flow.html, inspect.html, markdown specs). Always read their
+  //    content; in single-frame layout they ride onto the canvas as frames, but
+  //    in per-screen layout the canvas is reserved for the live screens, so the
+  //    artifacts go into the side drawer as tabs instead (returned in `artifacts`).
+  const perScreen = manifest.layout === 'per-screen'
+  const artifacts = []
   for (const art of manifest.artifacts || []) {
     const file = byPath.get(art.path)
     if (!file) {
@@ -95,20 +119,21 @@ export async function loadHandoffPackage(fileList) {
       continue
     }
     const text = await file.text()
-    if (art.type === 'html') {
+    if (perScreen) {
+      // Per-screen: artifacts live in the drawer, grouped into tabs. Pass the RAW
+      // content so the panel can render markdown inline as styled HTML (with copy
+      // buttons) and embed html docs (flow/inspect) as live iframes.
+      artifacts.push({ id: art.id, title: art.title || art.id, type: art.type, content: text, group: art.group || 'Docs' })
+    } else {
+      // Single-frame layout: artifacts ride onto the canvas as frames.
+      const html = art.type === 'markdown' ? renderMarkdownDoc(text, art.title) : text
       frames.push({
         role: 'artifact',
-        place: { title: art.title || art.id, srcDoc: text },
-        meta: { id: art.id, path: art.path },
-      })
-    } else if (art.type === 'markdown') {
-      frames.push({
-        role: 'artifact',
-        place: { title: art.title || art.id, srcDoc: renderMarkdownDoc(text, art.title) },
+        place: { title: art.title || art.id, srcDoc: html },
         meta: { id: art.id, path: art.path },
       })
     }
   }
 
-  return { manifest, frames }
+  return { manifest, frames, artifacts }
 }

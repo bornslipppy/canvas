@@ -230,6 +230,12 @@ export function useFigmaZoom(containerRef, options = {}) {
         gestureRef.current.pivotX = null;
         gestureRef.current.pivotY = null;
         gestureRef.current.consecutiveRailHits = 0;
+        // Re-sync the eased target to the ACTUAL current transform at the start
+        // of every fresh gesture. Otherwise a spacebar-drag (which the library
+        // pans directly, bypassing this hook's targetRef) leaves targetRef stale,
+        // and the next pinch zooms from the pre-drag position. Reading current
+        // here picks up any external pan/zoom since the last wheel gesture.
+        targetRef.current = readCurrent();
       }
       gestureRef.current.kind = kind;
       gestureRef.current.expiresAt = now + GESTURE_LOCK_MS;
