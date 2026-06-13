@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import { createPortal } from 'react-dom'
 import { TransformWrapper, TransformComponent, useControls } from 'react-zoom-pan-pinch'
 
-import { Plus, Upload, FolderUp, ChevronDown, ChevronLeft, ChevronRight, MessageCircle, MapPin, MousePointerClick, GripVertical } from 'lucide-react'
+import { Plus, Upload, FolderUp, Package, ChevronDown, ChevronLeft, ChevronRight, MessageCircle, MapPin, MousePointerClick, GripVertical } from 'lucide-react'
 
 // Import Shadcn Components
 import { Button } from "@/components/ui/button"
@@ -18,6 +18,10 @@ import { CommentsProvider, useComments } from './comments/CommentsContext'
 import { FramePins } from './comments/FramePins'
 import { CommentDrawer } from './comments/CommentDrawer'
 import { framePinColor } from './comments/frameColor'
+
+// Handoff package layer — load a live prototype + its governed spec, panel follows navigation
+import { loadHandoffPackage } from './handoff/loadHandoffPackage'
+import { HandoffPanel } from './handoff/HandoffPanel'
 
 // Folder upload (Tier 2 — Service Worker virtual filesystem)
 import { registerPreviewSW } from './preview/registerSW'
@@ -753,6 +757,9 @@ function AppInner() {
    * field is set.
    */
   const placeNewFrame = useCallback(({ title, url, srcDoc }) => {
+    // Hoisted out of setFrames so we can return it to the caller — the handoff
+    // loader needs the prototype's frame id to bind the spec panel to it.
+    const id = `f-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
     setFrames((prev) => {
       const GAP = 128
       const rightmostRight =
@@ -761,7 +768,7 @@ function AppInner() {
       const newY = prev.length > 0 ? prev[0].y : 5000 - FRAME_TOTAL_H / 2
 
       const frame = {
-        id: `f-${Date.now()}`,
+        id,
         title: title || `Frame ${prev.length + 1}`,
         url: url ?? '',
         srcDoc: srcDoc ?? undefined,
@@ -789,6 +796,7 @@ function AppInner() {
 
       return next
     })
+    return id
   }, [])
 
   /**
@@ -1024,6 +1032,31 @@ function AppInner() {
     }
   }, [placeNewFrame])
 
+  // Handoff package: pick a folder, place the prototype + spec artifacts as
+  // frames, and remember the prototype's frame id so HandoffPanel can bind to it.
+  const [handoffManifest, setHandoffManifest] = useState(null)
+  const [handoffProtoId, setHandoffProtoId] = useState(null)
+  const packageInputRef = useRef(null)
+
+  const handleOpenPackage = useCallback(async (e) => {
+    const fileList = e.target.files
+    e.target.value = ''
+    if (!fileList || fileList.length === 0) return
+    try {
+      const { manifest, frames } = await loadHandoffPackage(fileList)
+      let protoId = null
+      for (const f of frames) {
+        const id = placeNewFrame(f.place)            // prototype first, then artifacts
+        if (f.role === 'prototype') protoId = id
+      }
+      setHandoffManifest(manifest)
+      setHandoffProtoId(protoId)
+    } catch (err) {
+      console.error('[handoff] open failed:', err)
+      alert(err?.message || String(err))
+    }
+  }, [placeNewFrame])
+
   // Wall-bump CSS — applied to a wrapper OUTSIDE TransformWrapper so it doesn't fight the library's transform.
   const bumpStyle = bumpAxis
     ? { transform: bumpAxis === 'max' ? 'scale(1.005)' : 'scale(0.995)', transition: 'transform 100ms cubic-bezier(0.4, 0, 0.2, 1)' }
@@ -1149,6 +1182,16 @@ function AppInner() {
                 style={{ display: 'none' }}
                 aria-hidden="true"
               />
+              <input
+                ref={packageInputRef}
+                type="file"
+                webkitdirectory=""
+                directory=""
+                multiple
+                onChange={handleOpenPackage}
+                style={{ display: 'none' }}
+                aria-hidden="true"
+              />
 
               {/* Portaled dropdown menu. Anchored relative to the trigger via
                   computed coords so it floats above any overflow:hidden parent. */}
@@ -1192,6 +1235,18 @@ function AppInner() {
                         {folderUploadStatus === 'busy' ? (
                           <span className="ml-auto text-amber-400 text-[10px]">working…</span>
                         ) : null}
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setAddMenuOpen(false)
+                          packageInputRef.current?.click()
+                        }}
+                        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-neutral-800/90 text-neutral-300 text-left"
+                      >
+                        <Package className="size-3.5 shrink-0 text-neutral-500" aria-hidden strokeWidth={2} />
+                        Open handoff package
                       </button>
                     </div>,
                     document.body
@@ -1405,6 +1460,19 @@ function AppInner() {
           />
           Click on a prototype to drop a comment — Esc to cancel
         </div>
+      ) : null}
+
+      {/* Handoff spec panel — rendered once a package is loaded; follows the
+          live prototype's navigation. Self-contained fixed panel on the right. */}
+      {handoffManifest ? (
+        <HandoffPanel
+          manifest={handoffManifest}
+          prototypeFrameId={handoffProtoId}
+          onClose={() => {
+            setHandoffManifest(null)
+            setHandoffProtoId(null)
+          }}
+        />
       ) : null}
     </div>
   )
