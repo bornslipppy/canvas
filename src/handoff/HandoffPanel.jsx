@@ -49,13 +49,22 @@ const S = {
   pre: { margin: '6px 0 0', padding: '10px 12px', background: '#1e1e1e', borderRadius: 8, font: '11px/1.5 ui-monospace,Menlo,monospace', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#e6e6e6' },
   docRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 11px', margin: '4px 0', border: '1px solid #3c3c3c', borderRadius: 8, cursor: 'pointer', fontSize: 13, background: '#2c2c2b' },
   resize: { position: 'absolute', left: -3, top: 0, width: 8, height: '100%', cursor: 'ew-resize', zIndex: 3 },
+  dsBox: { border: '1px solid #3f5d78', background: '#1b2530', borderRadius: 8, padding: '10px 12px', margin: '4px 0 8px' },
+  dsName: { font: '600 14px/1.3 ui-sans-serif,system-ui', color: '#aebfff', margin: '0 0 6px' },
+  crit: { background: '#3a1718', color: '#f08a8a' },
+  driftRow: { borderLeft: '3px solid', borderRadius: 4, padding: '6px 8px', margin: '6px 0', background: '#241f12', fontSize: 12 },
 }
+
+/** matched=green, variant-gap=amber, custom=blue */
+const clsStyle = (c) => (c === 'matched' ? S.present : c === 'variant-gap' ? S.missing : S.id)
+/** drift severity → colour */
+const sevColor = (s) => (s === 'critical' ? '#f08a8a' : s === 'warning' ? '#f0c060' : '#9db4ff')
 
 const MIN_W = 320
 const MAX_W = 760
 const clampW = (w) => Math.max(MIN_W, Math.min(MAX_W, w))
 
-export function HandoffPanel({ manifest, prototypeFrameId, artifacts = [], activeSid = null, onSelectSid, onFocusScreen, inspect = null, onClearInspect, onClose }) {
+export function HandoffPanel({ manifest, prototypeFrameId, artifacts = [], activeSid = null, onSelectSid, onFocusScreen, inspect = null, liveDriftCounts = {}, onClearInspect, onClose }) {
   const followMode = !!prototypeFrameId
   const [tab, setTab] = useState('spec')
   const [width, setWidth] = useState(420)
@@ -122,12 +131,12 @@ export function HandoffPanel({ manifest, prototypeFrameId, artifacts = [], activ
       )}
 
       {tab === 'element' && inspect ? (
-        <div style={S.body}><ElementInspect info={inspect} onClear={onClearInspect} /></div>
+        <div style={S.body}><ElementInspect info={inspect} designSystem={manifest.designSystem} onClear={onClearInspect} /></div>
       ) : tab === 'spec' ? (
         <div style={S.body}>
           {followMode
-            ? <FollowSpec manifest={manifest} prototypeFrameId={prototypeFrameId} />
-            : <ListSpec manifest={manifest} activeSid={activeSid} onSelectSid={onSelectSid} onFocusScreen={onFocusScreen} />}
+            ? <FollowSpec manifest={manifest} prototypeFrameId={prototypeFrameId} liveDriftCounts={liveDriftCounts} />
+            : <ListSpec manifest={manifest} activeSid={activeSid} onSelectSid={onSelectSid} onFocusScreen={onFocusScreen} liveDriftCounts={liveDriftCounts} />}
         </div>
       ) : group ? (
         <GroupTab docs={group.items} />
@@ -229,7 +238,7 @@ const MD_CSS = `
 `
 
 /** FOLLOW mode body — single live prototype frame drives the spec. */
-function FollowSpec({ manifest, prototypeFrameId }) {
+function FollowSpec({ manifest, prototypeFrameId, liveDriftCounts = {} }) {
   const { route, screen } = useScreenBinding(manifest, prototypeFrameId)
   const components = manifest.components || []
   const screenComponents = screen ? components.filter((c) => (screen.renders || []).includes(c.cid)) : []
@@ -242,13 +251,14 @@ function FollowSpec({ manifest, prototypeFrameId }) {
       </p>
     )
   }
-  return <ScreenSpec screen={screen} route={route} components={screenComponents} />
+  // Single prototype reports under '_proto' (it repaints in place per screen).
+  return <ScreenSpec screen={screen} route={route} components={screenComponents} live={liveDriftCounts._proto} />
 }
 
 /** LIST mode body — per-screen layout. Selection is controlled by App so that
  *  clicking a live screen frame on the canvas selects it here too. The pills
  *  remain a manual fallback. */
-function ListSpec({ manifest, activeSid, onSelectSid, onFocusScreen }) {
+function ListSpec({ manifest, activeSid, onSelectSid, onFocusScreen, liveDriftCounts = {} }) {
   const screens = manifest.screens || []
   const [localSel, setLocalSel] = useState(screens[0]?.sid ?? null)
   const sel = activeSid ?? localSel
@@ -260,23 +270,42 @@ function ListSpec({ manifest, activeSid, onSelectSid, onFocusScreen }) {
     <>
       <div style={{ ...S.sec, marginTop: 0 }}>Screens ({screens.length})</div>
       <div>
-        {screens.map((s) => (
-          <span key={s.sid} onClick={() => select(s.sid)} style={{ ...S.pill, ...(s.sid === sel ? S.pillOn : {}) }} title={s.title}>
-            {s.sid}
-          </span>
-        ))}
+        {screens.map((s) => {
+          const lc = liveDriftCounts[s.sid]
+          const n = lc ? (lc.critical || 0) + (lc.warning || 0) : 0
+          return (
+            <span key={s.sid} onClick={() => select(s.sid)} style={{ ...S.pill, ...(s.sid === sel ? S.pillOn : {}) }} title={s.title}>
+              {s.sid}{n > 0 ? <span style={{ color: lc.critical ? '#f08a8a' : '#f0c060', marginLeft: 5 }}>⚑{n}</span> : null}
+            </span>
+          )
+        })}
       </div>
-      {screen && <div style={{ marginTop: 8 }}><ScreenSpec screen={screen} components={screenComponents} /></div>}
+      {screen && <div style={{ marginTop: 8 }}><ScreenSpec screen={screen} components={screenComponents} live={liveDriftCounts[sel]} /></div>}
     </>
   )
 }
 
-function ScreenSpec({ screen, route, components }) {
+function ScreenSpec({ screen, route, components, live }) {
   const refs = screen.specRefs || {}
+  const driftCount = (components || []).reduce((n, c) => n + (c.drift?.length || 0), 0)
+  const liveN = live ? (live.critical || 0) + (live.warning || 0) : 0
   return (
     <>
       <h2 style={S.h}>{screen.title || screen.sid}</h2>
       {route && <span style={S.route}>{route}</span>}
+      {driftCount > 0 && (
+        <span style={{ ...S.chip, ...S.missing, marginLeft: route ? 8 : 0 }} title="Authored design-system drift on this screen">
+          ⚑ {driftCount} DS drift
+        </span>
+      )}
+      {live && (
+        <span
+          style={{ ...S.chip, ...(live.critical ? S.crit : liveN ? S.missing : S.present), marginLeft: 8 }}
+          title={`Live arc-drift over ${live.total} DS elements: ${live.critical} hardcoded-color (2.1), ${live.warning} off-grid (2.3)`}
+        >
+          {liveN > 0 ? `◉ ${liveN} live drift` : `◉ clean · ${live.total} DS`}
+        </span>
+      )}
       {refs.codeEntry && (<><div style={S.sec}>Code entry</div><div style={S.code}>{refs.codeEntry}</div></>)}
       {arr(refs.brIds) && (<><div style={S.sec}>Business rules</div>{refs.brIds.map((b) => <span key={b} style={{ ...S.chip, ...S.id }}>{b}</span>)}</>)}
       {arr(refs.gIds) && (<><div style={S.sec}>Open interview gaps</div>{refs.gIds.map((g) => <span key={g} style={{ ...S.chip, ...S.id }}>{g}</span>)}</>)}
@@ -291,34 +320,176 @@ function ScreenSpec({ screen, route, components }) {
 }
 
 function ComponentCard({ c }) {
+  const ds = c.dsMatch
   return (
     <div style={S.comp}>
       <p style={S.compName}>{c.name || c.cid}</p>
+      {ds && (
+        <div style={S.dsBox}>
+          <p style={{ ...S.dsName, fontSize: 13, marginBottom: 4 }}>
+            → {ds.component}
+            {ds.classification && <span style={{ ...S.chip, ...clsStyle(ds.classification), marginLeft: 8 }}>{ds.classification}</span>}
+          </p>
+          {ds.props && <div style={S.code}>{ds.props}</div>}
+          {ds.import && <CopyBlock label="Import" code={ds.import} />}
+          {ds.notes && <div style={{ ...S.code, color: '#8a8a92', marginTop: 6 }}>{ds.notes}</div>}
+        </div>
+      )}
       {arr(c.statesPresent) && c.statesPresent.map((s) => <span key={s} style={{ ...S.chip, ...S.present }}>{s}</span>)}
       {arr(c.statesMissing) && c.statesMissing.map((s) => <span key={s} style={{ ...S.chip, ...S.missing }} title="Missing state">⚠ {s}</span>)}
       {c.implPointer && <div style={{ ...S.code, marginTop: 6 }}>{c.implPointer}</div>}
+      <DriftList drift={c.drift} />
     </div>
   )
 }
 
-/** Chrome-style live element inspect: real computed styles, copyable like Figma. */
-function ElementInspect({ info, onClear }) {
+/** Design-system drift: where the prototype diverges from the DS rules/composition.
+ *  Powered by the skill's arc-drift / enforcement-rules pass. */
+function DriftList({ drift }) {
+  if (!arr(drift)) return null
+  return (
+    <>
+      <div style={{ ...S.sec, marginTop: 10 }}>Design-system drift</div>
+      {drift.map((d, i) => (
+        <div key={i} style={{ ...S.driftRow, borderLeftColor: sevColor(d.severity) }}>
+          <span style={{ color: sevColor(d.severity), fontWeight: 600, textTransform: 'uppercase', fontSize: 10, letterSpacing: '.04em' }}>
+            {d.severity}
+          </span>{d.rule ? <span style={{ color: '#7a7a7a' }}> · {d.rule}</span> : null}
+          <div style={{ color: '#c8c8c8', marginTop: 3 }}>{d.message}</div>
+          {d.fix && <div style={{ color: '#8a8a92', marginTop: 3 }}>→ {d.fix}</div>}
+        </div>
+      ))}
+    </>
+  )
+}
+
+/**
+ * Live, computed DS drift for an inspected element — Atlas `arc-drift` framework
+ * applied to a coded prototype. arc-drift itself evaluates the Figma file (Figma
+ * MCP + variables); it can't run on a coded prototype, so we encode the subset of
+ * its rules that ARE computable from real computed styles + the token map, keeping
+ * Atlas's rule IDs, severities and Designer/System audience routing:
+ *   - 2.1 hardcoded color, not an ARC token        (Critical · Designer)
+ *   - 2.3 spacing off the 4px grid                 (Warning · Designer)
+ * The behavioural Critical rules (Link-for-actions → Button, etc.) need design
+ * intent, so those stay with a real Figma arc-drift run / human judgment.
+ */
+function liveDrift(info, designSystem) {
+  const out = []
+  const byHex = designSystem?.tokens?.byHex
+  if (byHex) {
+    [['text color', info.color], ['background', info.bg]].forEach(([k, v]) => {
+      if (v && v !== 'transparent' && /^#[0-9a-f]{6}$/i.test(v) && !byHex[v.toUpperCase()]) {
+        out.push({
+          rule: 'arc-drift 2.1', audience: 'Designer', severity: 'critical',
+          message: `Hardcoded ${k} ${v} — not an ARC color token.`,
+          fix: 'Use the nearest ARC token (var(--gst-…)).',
+        })
+      }
+    })
+  }
+  const sp = []
+  ;(info.layout || '').split('\n').forEach((line) => {
+    const m = line.match(/^(padding|gap):\s*(.+);$/)
+    if (!m) return
+    m[2].split(/\s+/).forEach((tok) => {
+      const n = parseFloat(tok)
+      if (/px$/.test(tok) && n > 0 && n % 4 !== 0 && !sp.includes(n)) sp.push(n)
+    })
+  })
+  if (sp.length) {
+    out.push({
+      rule: 'arc-drift 2.3', audience: 'Designer', severity: 'warning',
+      message: `Spacing off the 4px grid: ${sp.join('px, ')}px.`,
+      fix: 'Snap to a 4/8px step on the ARC spacing scale.',
+    })
+  }
+  return out
+}
+
+/** Renders live arc-drift findings with Atlas rule IDs + audience routing. */
+function LiveDrift({ findings }) {
+  if (!arr(findings)) return null
+  return (
+    <>
+      <div style={{ ...S.sec, marginTop: 12 }}>
+        Compliance <span style={{ color: '#7a7a7a', fontWeight: 400 }}>· ARC drift (live)</span>
+      </div>
+      {findings.map((d, i) => (
+        <div key={i} style={{ ...S.driftRow, borderLeftColor: sevColor(d.severity) }}>
+          <span style={{ color: sevColor(d.severity), fontWeight: 600, textTransform: 'uppercase', fontSize: 10, letterSpacing: '.04em' }}>
+            {d.severity}
+          </span>
+          <span style={{ color: '#7a7a7a' }}> · {d.rule}</span>
+          <span style={{ ...S.chip, ...(d.audience === 'Designer' ? S.missing : S.id), marginLeft: 8, fontSize: 10, padding: '1px 7px' }}>{d.audience}</span>
+          <div style={{ color: '#c8c8c8', marginTop: 3 }}>{d.message}</div>
+          {d.fix && <div style={{ color: '#8a8a92', marginTop: 3 }}>→ {d.fix}</div>}
+        </div>
+      ))}
+    </>
+  )
+}
+
+/** Design-system identity for an inspected element: real component name + import,
+ *  plus the Figma Code Connect link when the DS maintains one. */
+function DsBlock({ ds, designSystem }) {
+  const reg = (designSystem?.components && designSystem.components[ds.component]) || {}
+  const imp = reg.import || `import { ${ds.component} } from '${designSystem?.package || 'your-design-system'}'`
+  // Live drift check: is the tagged variant actually a valid variant of this DS component?
+  const variantInvalid = ds.variant && Array.isArray(reg.variants) && reg.variants.length && !reg.variants.includes(ds.variant)
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div style={{ ...S.sec, marginTop: 8 }}>Design system{designSystem?.name ? ` · ${designSystem.name}` : ''}</div>
+      <div style={S.dsBox}>
+        <p style={S.dsName}>{ds.component}{ds.variant ? <span style={{ color: '#8a9bd0', fontWeight: 400, fontSize: 13 }}> · {ds.variant}</span> : null}</p>
+        <span style={{ ...S.chip, ...S.present }}>verified — tagged in source</span>
+        {reg.codeConnect && <span style={{ ...S.chip, ...S.id }}>Figma Code Connect ✓</span>}
+        {variantInvalid && (
+          <div style={{ ...S.driftRow, borderLeftColor: '#f0c060', marginTop: 8 }}>
+            <span style={{ color: '#f0c060', fontWeight: 600 }}>⚑ variant “{ds.variant}” is not an ARC {ds.component} variant</span>
+            <div style={{ color: '#c8c8c8', marginTop: 3 }}>valid: {reg.variants.join(', ')}</div>
+          </div>
+        )}
+        {reg.props && <div style={{ ...S.code, marginTop: 4 }}>props: {reg.props}</div>}
+        {reg.figmaUrl && (
+          <a href={reg.figmaUrl} target="_blank" rel="noreferrer"
+            style={{ display: 'inline-block', marginTop: 8, fontSize: 12, color: '#aebfff', textDecoration: 'none' }}>
+            View in Figma ↗
+          </a>
+        )}
+      </div>
+      <CopyBlock label="Import" code={imp} />
+    </div>
+  )
+}
+
+/** Chrome-style live element inspect: real computed styles, copyable like Figma,
+ *  PLUS the real design-system component name (read from data-ds-component in source). */
+function ElementInspect({ info, designSystem, onClear }) {
   return (
     <>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2 style={S.h}>&lt;{info.tag}&gt; <span style={{ color: '#9a9aa2', fontWeight: 400, fontSize: 13 }}>{info.size.w}×{info.size.h}</span></h2>
         {onClear && <button onClick={onClear} style={S.x} title="Clear selection">×</button>}
       </div>
+      {info.ds && <DsBlock ds={info.ds} designSystem={designSystem} />}
+      <LiveDrift findings={liveDrift(info, designSystem)} />
       {info.classes && <div style={S.code}>.{info.classes.split(/\s+/).filter(Boolean).join(' .')}</div>}
       <CopyBlock label="Layout" code={info.layout} />
       <CopyBlock label="Style" code={info.style} />
       <CopyBlock label="Typography" code={info.typography} />
       {info.text && <CopyBlock label="Text content" code={info.text} />}
       <div style={S.sec}>Colors</div>
-      <Swatch label="text" value={info.color} />
-      <Swatch label="bg" value={info.bg} />
+      <Swatch label="text" value={info.color} token={tokenFor(info.color, designSystem)} />
+      <Swatch label="bg" value={info.bg} token={tokenFor(info.bg, designSystem)} />
     </>
   )
+}
+
+/** Resolve a computed hex to its DS token (e.g. #007A68 → --gst-primary). */
+function tokenFor(hex, designSystem) {
+  const map = designSystem?.tokens?.byHex
+  return hex && map ? map[hex.toUpperCase()] || null : null
 }
 
 function CopyBlock({ label, code }) {
@@ -336,13 +507,17 @@ function CopyBlock({ label, code }) {
   )
 }
 
-function Swatch({ label, value }) {
+function Swatch({ label, value, token }) {
   if (!value || value === 'transparent') return null
+  // Prefer copying the token var() when the value maps to a DS token.
+  const copyText = token ? `var(${token})` : value
   return (
-    <span onClick={() => { try { navigator.clipboard?.writeText(value) } catch { /* noop */ } }}
-      title="Click to copy" style={{ ...S.pill, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+    <span onClick={() => { try { navigator.clipboard?.writeText(copyText) } catch { /* noop */ } }}
+      title={token ? `Click to copy var(${token})` : 'Click to copy'} style={{ ...S.pill, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
       <span style={{ width: 12, height: 12, borderRadius: 3, border: '1px solid rgba(255,255,255,.18)', background: value }} />
-      {label} {value}
+      {label} {token
+        ? <><span style={{ color: '#6bd998', fontFamily: 'ui-monospace,Menlo,monospace' }}>var({token})</span> <span style={{ color: '#7a7a7a' }}>{value}</span></>
+        : value}
     </span>
   )
 }

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import { createPortal } from 'react-dom'
 import { TransformWrapper, TransformComponent, useControls } from 'react-zoom-pan-pinch'
 
-import { Plus, Upload, FolderUp, Package, ChevronLeft, ChevronRight, MessageCircle, MapPin, MousePointerClick, Maximize2 } from 'lucide-react'
+import { Plus, Upload, FolderUp, Package, ChevronLeft, ChevronRight, MessageCircle, MapPin, MousePointerClick, Maximize2, Crosshair } from 'lucide-react'
 
 // Import Shadcn Components
 import { Card } from "@/components/ui/card"
@@ -344,10 +344,24 @@ function AppInner() {
   const [isShiftPressed, setIsShiftPressed] = useState(false)
   const [isGestureActive, setIsGestureActive] = useState(false)
   const [isInteractMode, setIsInteractMode] = useState(false)
+  const [isInspectMode, setIsInspectMode] = useState(false) // DS inspect: hover/click to inspect components
   const [isZoomModifierPressed, setIsZoomModifierPressed] = useState(false)
-  const clickthroughIntent = isShiftPressed || isInteractMode
+  // Inspect mode also needs clicks to reach the iframe (shield down), like Interact.
+  const clickthroughIntent = isShiftPressed || isInteractMode || isInspectMode
   const canvasOverride = isGestureActive || isZoomModifierPressed || isSpacePressed || commentMode
   const shieldActive = !clickthroughIntent || canvasOverride
+
+  // Broadcast DS-inspect mode to every prototype iframe so plain hover/click
+  // inspects (and snaps to the nearest DS component). Re-sent on frame changes
+  // to reach iframes that loaded after the toggle.
+  useEffect(() => {
+    const send = () => document.querySelectorAll('iframe[data-frame-id]').forEach((f) => {
+      try { f.contentWindow?.postMessage({ type: 'CANVAS_INSPECT_MODE', on: isInspectMode }, '*') } catch { /* noop */ }
+    })
+    send()
+    const t = setTimeout(send, 300)
+    return () => clearTimeout(t)
+  }, [isInspectMode, frames])
 
   // Frame drag state: null when no drag in progress, otherwise carries the frame
   // being dragged + the cursor/frame positions at drag-start + the canvas scale
@@ -1046,6 +1060,7 @@ function AppInner() {
   const [handoffScreenSids, setHandoffScreenSids] = useState({}) // frameId → sid (per-screen)
   const [handoffActiveSid, setHandoffActiveSid] = useState(null) // selected screen in the drawer
   const [handoffInspect, setHandoffInspect] = useState(null)     // alt-clicked element's computed styles
+  const [handoffDrift, setHandoffDrift] = useState({})           // sid (or '_proto') → live arc-drift counts
   const packageInputRef = useRef(null)
 
   // Click-to-select: clicking a live screen frame (Interact mode) focuses its
@@ -1069,10 +1084,32 @@ function AppInner() {
         setHandoffInspect(e.data.info)
         setHandoffPanelOpen(true)
       }
+      // Live arc-drift rollup: a frame reports its computed-DOM counts. Match the
+      // source window → frame → sid; single/follow prototypes file under '_proto'.
+      if (e.data?.type === 'PROTOTYPE_DRIFT') {
+        const ifr = [...document.querySelectorAll('iframe[data-frame-id]')].find((f) => f.contentWindow === e.source)
+        const counts = { critical: e.data.critical || 0, warning: e.data.warning || 0, total: e.data.total || 0 }
+        const sid = ifr && handoffScreenSids[ifr.getAttribute('data-frame-id')]
+        setHandoffDrift((prev) => ({ ...prev, [sid || '_proto']: counts }))
+      }
     }
     window.addEventListener('blur', onBlur)
     window.addEventListener('message', onMsg)
     return () => { window.removeEventListener('blur', onBlur); window.removeEventListener('message', onMsg) }
+  }, [handoffManifest, handoffScreenSids])
+
+  // Ask every live frame to audit itself once it has loaded, handing over the DS
+  // token map (the canvas owns it). Re-fires when frames change (sids settle).
+  useEffect(() => {
+    if (!handoffManifest) return
+    const byHex = handoffManifest.designSystem?.tokens?.byHex
+    if (!byHex) return
+    const t = setTimeout(() => {
+      document.querySelectorAll('iframe[data-frame-id]').forEach((f) => {
+        try { f.contentWindow?.postMessage({ type: 'CANVAS_DRIFT_AUDIT', byHex }, '*') } catch { /* noop */ }
+      })
+    }, 1500)
+    return () => clearTimeout(t)
   }, [handoffManifest, handoffScreenSids])
 
   // Clicking a screen in the drawer's list pans/zooms the board to that frame.
@@ -1416,6 +1453,23 @@ function AppInner() {
               </button>
             </Tooltip>
 
+            {/* Inspect — hover/click a component to see its DS name, values, tokens. */}
+            <Tooltip label="Inspect components">
+              <button
+                type="button"
+                onClick={() => setIsInspectMode((v) => !v)}
+                className={
+                  'h-8 w-8 rounded-md transition-colors flex items-center justify-center ' +
+                  (isInspectMode
+                    ? 'bg-blue-600 text-white hover:bg-blue-700'
+                    : 'bg-neutral-800/90 text-neutral-300 hover:bg-neutral-700')
+                }
+              >
+                <Crosshair className="size-4" aria-hidden strokeWidth={2} />
+                <span className="sr-only">Inspect components</span>
+              </button>
+            </Tooltip>
+
           </div>
         </Card>
       </div>
@@ -1495,7 +1549,9 @@ function AppInner() {
 
       {/* Handoff spec panel — rendered once a package is loaded; follows the
           live prototype's navigation. Self-contained fixed panel on the right. */}
-      {handoffManifest && handoffPanelOpen ? (
+      {/* Spec panel and the comments drawer share the right edge — show only one.
+          Opening Comments hides the spec; closing Comments brings it back. */}
+      {handoffManifest && handoffPanelOpen && !drawerOpen ? (
         <HandoffPanel
           manifest={handoffManifest}
           prototypeFrameId={handoffProtoId}
@@ -1504,6 +1560,7 @@ function AppInner() {
           onSelectSid={setHandoffActiveSid}
           onFocusScreen={focusScreen}
           inspect={handoffInspect}
+          liveDriftCounts={handoffDrift}
           onClearInspect={() => setHandoffInspect(null)}
           onClose={() => setHandoffPanelOpen(false)}
         />
@@ -1511,7 +1568,7 @@ function AppInner() {
 
       {/* Reopen affordance — closing the panel hides it (keeps the binding alive)
           instead of unloading the package. */}
-      {handoffManifest && !handoffPanelOpen ? (
+      {handoffManifest && !handoffPanelOpen && !drawerOpen ? (
         <button
           onClick={() => setHandoffPanelOpen(true)}
           style={{
