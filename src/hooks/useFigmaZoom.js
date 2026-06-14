@@ -314,12 +314,18 @@ export function useFigmaZoom(containerRef, options = {}) {
       wasActiveRef.current = true;
     };
 
-    // Non-passive so we can preventDefault. This is scoped to the canvas container
-    // only — the rest of the page can keep passive listeners (good for Lighthouse).
-    container.addEventListener('wheel', onWheel, { passive: false });
+    // Attach to the STATIC full-viewport wrapper (.react-transform-wrapper), NOT the
+    // inner WORLD div. The inner div is a fixed 40000px square; when zoomed/panned so
+    // it doesn't fill the screen, the leftover black margin falls outside it and gets
+    // no wheel events — so swipe/zoom died over the margins. The wrapper always fills
+    // the viewport, and the pivot math above is already wrapper-relative, so this is
+    // safe and makes gestures work everywhere on the canvas, grid or not.
+    // Non-passive so we can preventDefault (keeps the rest of the page passive).
+    const wheelSurface = container.closest('.react-transform-wrapper') ?? container;
+    wheelSurface.addEventListener('wheel', onWheel, { passive: false });
 
     return () => {
-      container.removeEventListener('wheel', onWheel);
+      wheelSurface.removeEventListener('wheel', onWheel);
       if (rafRef.current != null) {
         cancelAnimationFrame(rafRef.current);
         rafRef.current = null;

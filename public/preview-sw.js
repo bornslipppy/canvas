@@ -86,17 +86,33 @@ self.addEventListener('fetch', (event) => {
     return
   }
 
-  // For non-/preview/ requests: only intercept if the requesting client
-  // is itself a /preview/ iframe trying to load an absolute-path asset
-  // that "escaped" its iframe scope. In every other case (canvas's own
-  // pages, dev-server HMR, etc.) we MUST NOT call event.respondWith()
-  // because re-fetching the request from inside the SW can fail with
-  // opaque TypeErrors (especially in dev mode), breaking the canvas itself.
-  //
-  // Determining this requires looking up the client by clientId, which
-  // we do synchronously below. If we can't get a client OR it isn't a
-  // preview iframe, we don't respond — letting the browser handle the
-  // request via the default network path.
+  // Everything below is a non-/preview/ request. The ONLY non-/preview case we
+  // legitimately handle is an "escaped" absolute-path asset (e.g. /assets/app.js)
+  // requested BY a preview iframe. We must NEVER touch the canvas's own traffic:
+  // re-fetching the host app's navigation, dev-server, or HMR requests from
+  // inside the SW can fail with opaque TypeErrors and blank the whole canvas.
+  // (This guard was missing — the SW called respondWith() for every non-preview
+  // request, which is what blanked the app shell on reload and stalled it.)
+  const req = event.request
+  const p = url.pathname
+
+  // 1. Never intercept top-level / iframe navigations to non-preview URLs —
+  //    that's the canvas app shell loading. (Preview iframes navigate to
+  //    /preview/... which is handled by the branch above.)
+  if (req.mode === 'navigate') return
+
+  // 2. Never intercept Vite dev-server / HMR / module traffic.
+  if (
+    p.startsWith('/@') ||            // /@vite/client, /@react-refresh, /@id, /@fs
+    p.startsWith('/src/') ||
+    p.startsWith('/node_modules/') ||
+    p.includes('/.vite/') ||
+    p === '/preview-sw.js'
+  ) return
+
+  // 3. Only the remaining absolute-path asset requests can be iframe escapes.
+  //    handlePossibleEscape confirms (async) the client really is a preview
+  //    iframe and otherwise passes the request through untouched.
   const clientId = event.clientId || event.resultingClientId
   if (!clientId) return
 

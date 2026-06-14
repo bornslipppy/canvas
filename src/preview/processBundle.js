@@ -100,9 +100,29 @@ function injectBase(html, baseHref) {
  * user typically picks the project folder, not the dist subfolder — so we
  * need to detect "actual web root" inside the upload.
  */
-function findVirtualRoot(paths) {
+function findVirtualRoot(paths, entryHint) {
   const htmlFiles = paths.filter((p) => /\.html?$/i.test(p))
   if (htmlFiles.length === 0) return null
+
+  // If the manifest names the prototype entry, honor it: serve the directory of
+  // the file whose path matches the hint, instead of guessing the shallowest
+  // index.html. This lets a full project (source index.html + built dist/) be
+  // loaded directly — the manifest points the canvas at dist/index.html.
+  if (entryHint) {
+    const norm = String(entryHint).replace(/^\.?\//, '') // "./prototype/dist/index.html" → "prototype/dist/index.html"
+    const hit =
+      htmlFiles.find((p) => p === norm || p.endsWith('/' + norm)) ||
+      // also tolerate hint relative to the picked-folder root (one segment stripped)
+      htmlFiles.find((p) => p.split('/').slice(1).join('/') === norm)
+    if (hit) {
+      const lastSlash = hit.lastIndexOf('/')
+      return {
+        rootPrefix: lastSlash >= 0 ? hit.slice(0, lastSlash + 1) : '',
+        entryPath: lastSlash >= 0 ? hit.slice(lastSlash + 1) : hit,
+      }
+    }
+    // hint didn't match anything — fall through to the shallowest heuristic
+  }
 
   const indexFiles = htmlFiles.filter((p) => /\/index\.html?$|^index\.html?$/i.test(p))
   const candidates = indexFiles.length > 0 ? indexFiles : htmlFiles
@@ -125,7 +145,7 @@ function findVirtualRoot(paths) {
  * caller uses uuid+entryPath to compute the iframe URL after the SW
  * confirms upload.
  */
-export async function uploadFolderBundle(fileList) {
+export async function uploadFolderBundle(fileList, { entryHint } = {}) {
   if (!fileList || fileList.length === 0) {
     throw new Error('No files selected')
   }
@@ -133,7 +153,7 @@ export async function uploadFolderBundle(fileList) {
   const files = Array.from(fileList)
   const paths = files.map((f) => f.webkitRelativePath || f.name)
 
-  const root = findVirtualRoot(paths)
+  const root = findVirtualRoot(paths, entryHint)
   if (!root) {
     throw new Error('No HTML files found in the folder')
   }

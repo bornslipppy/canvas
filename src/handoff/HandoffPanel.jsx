@@ -156,7 +156,28 @@ function GroupTab({ docs }) {
         <section key={d.id} style={{ marginBottom: 22 }}>
           <div style={{ ...S.sec, marginTop: 0, color: '#ffffff', fontSize: 13 }}>{d.title}</div>
           {d.type === 'html'
-            ? <iframe title={d.title} srcDoc={d.content} style={{ width: '100%', height: 380, border: '1px solid #3c3c3c', borderRadius: 8, background: '#262626' }} />
+            ? <iframe
+                title={d.title}
+                srcDoc={d.content}
+                scrolling="no"
+                onLoad={(e) => {
+                  // Auto-size to content so the doc flows in the panel's own scroll
+                  // instead of a cropped inner scrollbar. srcDoc is same-origin.
+                  try {
+                    const ifr = e.currentTarget
+                    const doc = ifr.contentDocument
+                    if (doc?.body) {
+                      const fit = () => { ifr.style.height = doc.documentElement.scrollHeight + 'px' }
+                      fit()
+                      // re-fit after async renders (Mermaid diagrams, images, fonts)
+                      ;[150, 500, 1200].forEach((d) => setTimeout(fit, d))
+                      doc.addEventListener('input', () => setTimeout(fit, 0))
+                      doc.addEventListener('click', () => setTimeout(fit, 0))
+                    }
+                  } catch { /* cross-origin fallback: keep default height */ }
+                }}
+                style={{ width: '100%', height: 400, border: '1px solid #3c3c3c', borderRadius: 8, background: '#262626', display: 'block', overflow: 'hidden' }}
+              />
             : <MarkdownDoc text={d.content} />}
         </section>
       ))}
@@ -274,7 +295,7 @@ function ListSpec({ manifest, activeSid, onSelectSid, onFocusScreen, liveDriftCo
           const lc = liveDriftCounts[s.sid]
           const n = lc ? (lc.critical || 0) + (lc.warning || 0) : 0
           return (
-            <span key={s.sid} onClick={() => select(s.sid)} style={{ ...S.pill, ...(s.sid === sel ? S.pillOn : {}) }} title={s.title}>
+            <span key={s.sid} onClick={() => select(s.sid)} style={{ ...S.pill, ...(s.sid === sel ? S.pillOn : {}) }} title={s.title ? `${s.sid} — ${s.title}` : s.sid}>
               {s.sid}{n > 0 ? <span style={{ color: lc.critical ? '#f08a8a' : '#f0c060', marginLeft: 5 }}>⚑{n}</span> : null}
             </span>
           )

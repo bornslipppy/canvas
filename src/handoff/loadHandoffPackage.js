@@ -32,6 +32,26 @@ function packageRelPath(webkitRelativePath) {
 }
 
 /**
+ * Tolerant artifact lookup. Tries the exact manifest path first, then a few
+ * forgiving variants so a manifest authored with a slightly different base
+ * (e.g. with/without a `package/` prefix, or relative to a nested dir) still
+ * resolves: normalized `./`, suffix match, and basename match.
+ */
+function findArtifactFile(byPath, artPath) {
+  if (!artPath) return null
+  const norm = artPath.replace(/^\.?\//, '')
+  if (byPath.has(norm)) return byPath.get(norm)
+  // suffix match: some key ends with the artifact path (or vice-versa)
+  for (const [key, file] of byPath) {
+    if (key === norm || key.endsWith('/' + norm) || norm.endsWith('/' + key)) return file
+  }
+  // last resort: unique basename match
+  const base = norm.split('/').pop()
+  const matches = [...byPath].filter(([k]) => k.split('/').pop() === base)
+  return matches.length === 1 ? matches[0][1] : null
+}
+
+/**
  * @param {FileList|File[]} fileList  result of an <input webkitdirectory> pick
  * @returns {Promise<{manifest: object, frames: object[]}>}
  */
@@ -76,7 +96,9 @@ export async function loadHandoffPackage(fileList) {
     // fall outside that root and are simply not served here; we load them as
     // srcDoc below, so that's fine.
     await registerPreviewSW()
-    const result = await uploadFolderBundle(files)
+    // Honor the manifest's declared entry so a full project (source index.html
+    // + built dist/) serves the built app rather than the shallowest index.html.
+    const result = await uploadFolderBundle(files, { entryHint: proto.entry })
     const baseUrl = window.location.origin + result.previewURL
 
     if (manifest.layout === 'per-screen' && Array.isArray(manifest.screens) && manifest.screens.length) {
@@ -113,7 +135,7 @@ export async function loadHandoffPackage(fileList) {
   const perScreen = manifest.layout === 'per-screen'
   const artifacts = []
   for (const art of manifest.artifacts || []) {
-    const file = byPath.get(art.path)
+    const file = findArtifactFile(byPath, art.path)
     if (!file) {
       console.warn(`[handoff] artifact missing from package: ${art.path}`)
       continue
