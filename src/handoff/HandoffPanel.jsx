@@ -15,6 +15,7 @@
 
 import { useState } from 'react'
 import { useScreenBinding } from './useScreenBinding'
+import { resolveSpace, resolveRadius, resolveType, readMetrics } from './tokens'
 
 const S = {
   panel: {
@@ -53,6 +54,12 @@ const S = {
   dsName: { font: '600 14px/1.3 ui-sans-serif,system-ui', color: '#aebfff', margin: '0 0 6px' },
   crit: { background: '#3a1718', color: '#f08a8a' },
   driftRow: { borderLeft: '3px solid', borderRadius: 4, padding: '6px 8px', margin: '6px 0', background: '#241f12', fontSize: 12 },
+  // "inferred" token chip — provisional, not verified against a package token map.
+  infer: { background: '#16303a', color: '#7fc4dd' },
+  tokRow: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: '1px solid #2e2e2e' },
+  tokLabel: { flex: '0 0 96px', color: '#9a9aa2', fontSize: 12 },
+  tokPx: { flex: '0 0 52px', color: '#e6e6e6', fontFamily: 'ui-monospace,Menlo,monospace', fontSize: 12 },
+  legend: { color: '#7a7a7a', fontSize: 11, marginTop: 8 },
 }
 
 /** matched=green, variant-gap=amber, custom=blue */
@@ -409,20 +416,25 @@ function liveDrift(info, designSystem) {
       }
     })
   }
-  const sp = []
-  ;(info.layout || '').split('\n').forEach((line) => {
-    const m = line.match(/^(padding|gap):\s*(.+);$/)
-    if (!m) return
-    m[2].split(/\s+/).forEach((tok) => {
-      const n = parseFloat(tok)
-      if (/px$/.test(tok) && n > 0 && n % 4 !== 0 && !sp.includes(n)) sp.push(n)
-    })
+  // 2.3 off-grid spacing — now explained: name the metric, the value, and the
+  // nearest resolvable token(s) instead of just "off the 4px grid: 6px".
+  const m = readMetrics(info)
+  const offGrid = []
+  ;[
+    ['padding-top', m.paddingTop], ['padding-right', m.paddingRight],
+    ['padding-bottom', m.paddingBottom], ['padding-left', m.paddingLeft], ['gap', m.gap],
+  ].forEach(([label, px]) => {
+    if (px == null || px === 0) return
+    const res = resolveSpace(px, designSystem)
+    if (res?.source === 'off-grid') offGrid.push({ label, px, nearest: res.nearest })
   })
-  if (sp.length) {
+  if (offGrid.length) {
+    const fmt = (n) => (n ? `${n.px}px (${n.token})` : null)
     out.push({
       rule: 'arc-drift 2.3', audience: 'Designer', severity: 'warning',
-      message: `Spacing off the 4px grid: ${sp.join('px, ')}px.`,
-      fix: 'Snap to a 4/8px step on the ARC spacing scale.',
+      message: offGrid.map((o) => `${o.label} ${o.px}px → no spacing token`).join('; ') + '.',
+      fix: 'Snap to the nearest ARC step — ' +
+        offGrid.map((o) => `${o.label} → ${[fmt(o.nearest?.lo), fmt(o.nearest?.hi)].filter(Boolean).join(' or ')}`).join('; ') + '.',
     })
   }
   return out
@@ -495,6 +507,7 @@ function ElementInspect({ info, designSystem, onClear }) {
       </div>
       {info.ds && <DsBlock ds={info.ds} designSystem={designSystem} />}
       <LiveDrift findings={liveDrift(info, designSystem)} />
+      <LayoutTokens info={info} designSystem={designSystem} />
       {info.classes && <div style={S.code}>.{info.classes.split(/\s+/).filter(Boolean).join(' .')}</div>}
       <CopyBlock label="Layout" code={info.layout} />
       <CopyBlock label="Style" code={info.style} />
@@ -504,6 +517,75 @@ function ElementInspect({ info, designSystem, onClear }) {
       <Swatch label="text" value={info.color} token={tokenFor(info.color, designSystem)} />
       <Swatch label="bg" value={info.bg} token={tokenFor(info.bg, designSystem)} />
     </>
+  )
+}
+
+/**
+ * Layout tokens — the Figma "Layout" panel's job, for a coded prototype: every
+ * spacing / radius / type metric resolved to its DS token name (green = mapped,
+ * teal ~ = inferred from the 4px scale, amber = no token = drift). This is the
+ * non-color half of token resolution; colors live in the Colors section below.
+ */
+function LayoutTokens({ info, designSystem }) {
+  const m = readMetrics(info)
+  const rows = []
+  const spacing = [
+    ['padding-top', m.paddingTop], ['padding-right', m.paddingRight],
+    ['padding-bottom', m.paddingBottom], ['padding-left', m.paddingLeft], ['gap', m.gap],
+  ]
+  for (const [label, px] of spacing) {
+    if (px == null || px === 0) continue
+    rows.push(<TokenRow key={label} label={label} px={px} res={resolveSpace(px, designSystem)} />)
+  }
+  if (m.borderRadius) rows.push(<TokenRow key="radius" label="radius" px={m.borderRadius} res={resolveRadius(m.borderRadius, designSystem)} />)
+  const type = m.fontSize ? resolveType(m.fontSize, m.lineHeight, m.fontWeight, designSystem) : null
+  if (!rows.length && !type) return null
+  const anyInferred = rows.some((r) => r.props.res?.source === 'inferred')
+  return (
+    <>
+      <div style={S.sec}>Layout tokens</div>
+      {rows}
+      {type && <TypeRow t={type} />}
+      {anyInferred && (
+        <div style={S.legend}>~ inferred from the 4px scale — no spacing map in this package; ship one to verify.</div>
+      )}
+    </>
+  )
+}
+
+/** One spacing/radius metric row: label · px · resolved-token chip. */
+function TokenRow({ label, px, res }) {
+  let chip
+  if (res?.token && res.source === 'map') {
+    chip = <span style={{ ...S.chip, ...S.present, margin: 0 }} title="Mapped to a DS token">{res.token}</span>
+  } else if (res?.token && res.source === 'inferred') {
+    chip = <span style={{ ...S.chip, ...S.infer, margin: 0 }} title="Inferred from the 4px scale — not verified against a package token map">{res.token} ~</span>
+  } else if (res?.source === 'off-grid') {
+    const near = [res.nearest?.lo, res.nearest?.hi].filter(Boolean).map((n) => `${n.px}px (${n.token})`).join(' / ')
+    chip = <span style={{ ...S.chip, ...S.missing, margin: 0 }} title={near ? `Nearest: ${near}` : 'No matching spacing token'}>no token</span>
+  } else {
+    chip = <span style={{ ...S.chip, ...S.missing, margin: 0 }} title="No matching token">unmapped</span>
+  }
+  return (
+    <div style={S.tokRow}>
+      <span style={S.tokLabel}>{label}</span>
+      <span style={S.tokPx}>{px}px</span>
+      {chip}
+    </div>
+  )
+}
+
+/** Typography token row: "14/20 · 400" + resolved text-style name. */
+function TypeRow({ t }) {
+  const meta = `${t.size}${t.line ? '/' + t.line : ''}${t.weight ? ' · ' + t.weight : ''}`
+  return (
+    <div style={S.tokRow}>
+      <span style={S.tokLabel}>text style</span>
+      <span style={{ ...S.tokPx, flexBasis: 72 }}>{meta}</span>
+      {t.token
+        ? <span style={{ ...S.chip, ...S.present, margin: 0 }} title="Mapped to a DS text style">{t.token}</span>
+        : <span style={{ ...S.chip, ...S.missing, margin: 0 }} title="No matching text style — ship a tokens.type map to resolve">no text style</span>}
+    </div>
   )
 }
 
