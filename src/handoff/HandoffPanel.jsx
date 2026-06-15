@@ -585,6 +585,18 @@ function DsBlock({ ds, designSystem }) {
   const imp = reg.import || `import { ${ds.component} } from '${designSystem?.package || 'your-design-system'}'`
   // Live drift check: is the tagged variant actually a valid variant of this DS component?
   const variantInvalid = ds.variant && Array.isArray(reg.variants) && reg.variants.length && !reg.variants.includes(ds.variant)
+  // byVariant / dsCatalog / mcpNotes live on the REGISTRY entry (from build-ds-registry);
+  // fall back to the inspected element's own dsMatch if present.
+  const byVariant = ds.byVariant || reg.byVariant
+  const variantProperty = ds.variantProperty || reg.variantProperty
+  const mcpNotes = reg.mcpNotes || ds.notes
+  // dsCatalog shape differs by source: manifest dsMatch uses {variants}, the registry uses
+  // {properties:{prop:{options}}}. Normalize to a { prop: [options] } map.
+  const catRaw = ds.dsCatalog || reg.dsCatalog
+  const dsCatalogVariants = catRaw
+    ? (catRaw.variants || Object.fromEntries(Object.entries(catRaw.properties || {})
+        .filter(([, d]) => Array.isArray(d.options)).map(([k, d]) => [k, d.options])))
+    : null
   return (
     <div style={{ marginTop: 4 }}>
       <div style={{ ...S.sec, marginTop: 8 }}>Design system{designSystem?.name ? ` · ${designSystem.name}` : ''}</div>
@@ -599,21 +611,25 @@ function DsBlock({ ds, designSystem }) {
           </div>
         )}
         {reg.props && <div style={{ ...S.code, marginTop: 4 }}>props: {reg.props}</div>}
+        {/* finding 2 — per-component usage guidance from the registry (digest `purpose`) */}
+        {mcpNotes && (
+          <div style={{ ...S.code, color: '#c8c8c8', marginTop: 6, borderLeft: '2px solid #5566aa', paddingLeft: 6 }}>📝 {mcpNotes}</div>
+        )}
         {/* finding 7 — variant restrictions on the live element path */}
-        {ds.byVariant && (
+        {byVariant && (
           <div style={{ marginTop: 8, fontSize: 12 }}>
             <div style={{ color: '#8a8a92', marginBottom: 4 }}>
-              Variant-restricted{ds.variantProperty ? ` · ${ds.variantProperty}` : ''}:
+              Variant-restricted{variantProperty ? ` · ${variantProperty}` : ''}:
             </div>
-            {Object.entries(ds.byVariant).map(([val, b]) => (
+            {Object.entries(byVariant).map(([val, b]) => (
               <div key={val} style={S.code}><strong style={{ color: '#aebfff' }}>{val}</strong> → {b.component}</div>
             ))}
           </div>
         )}
         {/* finding 1 — DS catalog option set for this element */}
-        {ds.dsCatalog && Object.entries(ds.dsCatalog.variants).map(([prop, opts]) => (
+        {dsCatalogVariants && Object.entries(dsCatalogVariants).map(([prop, opts]) => (
           <div key={prop} style={{ ...S.code, marginTop: 4 }}>
-            <span style={{ color: '#8a8a92' }}>catalog ({prop}):</span> {opts.join(' · ')}
+            <span style={{ color: '#8a8a92' }}>catalog ({prop}):</span> {(Array.isArray(opts) ? opts : []).join(' · ')}
           </div>
         ))}
         {reg.figmaUrl && (
