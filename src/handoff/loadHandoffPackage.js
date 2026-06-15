@@ -79,11 +79,17 @@ export async function loadHandoffPackage(fileList) {
   }
 
   const frames = []
+  // The served base URL of the prototype, captured in whichever branch runs, so
+  // componentVariants frames (step 4) can deep-link the SAME prototype to a
+  // gallery state via `#sid=`.
+  let protoBaseUrl = null
+  let protoUuid = null
 
   // 2. Prototype frame.
   const proto = manifest.prototype || {}
   if (proto.mode === 'url') {
     // Hosted prototype — no bundling, just point a URL frame at it.
+    protoBaseUrl = proto.entry
     frames.push({
       role: 'prototype',
       place: { title: manifest.package?.name || 'Prototype', url: proto.entry },
@@ -100,6 +106,8 @@ export async function loadHandoffPackage(fileList) {
     // + built dist/) serves the built app rather than the shallowest index.html.
     const result = await uploadFolderBundle(files, { entryHint: proto.entry })
     const baseUrl = window.location.origin + result.previewURL
+    protoBaseUrl = baseUrl
+    protoUuid = result.uuid
 
     if (manifest.layout === 'per-screen' && Array.isArray(manifest.screens) && manifest.screens.length) {
       // Slice the prototype into one LIVE frame per screen. Each frame loads the
@@ -157,5 +165,63 @@ export async function loadHandoffPackage(fileList) {
     }
   }
 
-  return { manifest, frames, artifacts }
+  // 4. Component-variants frames — the detached "all variants of one component"
+  //    boards (canvas-handoff-v1-design.md §1b). Unlike screens/artifacts, these
+  //    ALWAYS ride onto the canvas as standalone frames (per-screen or single):
+  //    they are the board-level "here is every variant this component must
+  //    support" view a developer expects from Figma.
+  //      - source 'prototype-gallery' → a LIVE frame, the same served prototype
+  //        deep-linked via `#sid=<stateMatch>` to the gallery state.
+  //      - source 'markdown'          → a static srcDoc frame rendered from the
+  //        documented variants (the designer's text fallback, promoted to a frame).
+  //      - fidelity 'missing'         → NO frame; surfaced as a flag instead
+  //        (returned in `variantFlags` for the panel/inspector to render).
+  const variantFlags = []
+  for (const cv of manifest.componentVariants || []) {
+    const title = cv.title || `${cv.component || 'Component'} — variants`
+    if (cv.fidelity === 'missing' || cv.source === 'none') {
+      variantFlags.push({
+        cvid: cv.cvid,
+        component: cv.component,
+        selector: cv.selector,
+        cid: cv.cid || null,
+        reason: cv.note || 'Variants are known but no gallery state or doc exists yet — designer to author.',
+        matrixRef: cv.matrixRef || null,
+      })
+      continue
+    }
+    if (cv.source === 'prototype-gallery' && protoBaseUrl && cv.stateMatch) {
+      // Live gallery state — reuse the exact screen deep-link mechanism.
+      frames.push({
+        role: 'variants',
+        place: { title, url: `${protoBaseUrl}#sid=${encodeURIComponent(cv.stateMatch)}` },
+        meta: { cvid: cv.cvid, component: cv.component, selector: cv.selector, cid: cv.cid || null, fidelity: cv.fidelity || 'verified', uuid: protoUuid },
+      })
+      continue
+    }
+    // Markdown source (or a gallery with no served prototype): render the
+    // documented variants as a self-contained srcDoc frame.
+    const docFile = findArtifactFile(byPath, (cv.docPath || '').split('#')[0])
+    if (docFile) {
+      const md = await docFile.text()
+      frames.push({
+        role: 'variants',
+        place: { title, srcDoc: renderMarkdownDoc(md, title) },
+        meta: { cvid: cv.cvid, component: cv.component, selector: cv.selector, cid: cv.cid || null, fidelity: cv.fidelity || 'inferred' },
+      })
+    } else {
+      // Documented as having variants but the doc is missing from the package —
+      // degrade to a flag rather than a broken frame.
+      variantFlags.push({
+        cvid: cv.cvid,
+        component: cv.component,
+        selector: cv.selector,
+        cid: cv.cid || null,
+        reason: `Variants doc not found in package: ${cv.docPath || '(no docPath)'}`,
+        matrixRef: cv.matrixRef || null,
+      })
+    }
+  }
+
+  return { manifest, frames, artifacts, variantFlags }
 }

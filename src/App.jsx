@@ -1061,6 +1061,8 @@ function AppInner() {
   const [handoffActiveSid, setHandoffActiveSid] = useState(null) // selected screen in the drawer
   const [handoffInspect, setHandoffInspect] = useState(null)     // alt-clicked element's computed styles
   const [handoffDrift, setHandoffDrift] = useState({})           // sid (or '_proto') → live arc-drift counts
+  const [handoffVariantCvids, setHandoffVariantCvids] = useState({}) // frameId → cvid (variant frames)
+  const [handoffVariantFlags, setHandoffVariantFlags] = useState([]) // components with variants but no gallery yet
   const packageInputRef = useRef(null)
 
   // Click-to-select: clicking a live screen frame (Interact mode) focuses its
@@ -1088,7 +1090,7 @@ function AppInner() {
       // source window → frame → sid; single/follow prototypes file under '_proto'.
       if (e.data?.type === 'PROTOTYPE_DRIFT') {
         const ifr = [...document.querySelectorAll('iframe[data-frame-id]')].find((f) => f.contentWindow === e.source)
-        const counts = { critical: e.data.critical || 0, warning: e.data.warning || 0, total: e.data.total || 0 }
+        const counts = { critical: e.data.critical || 0, warning: e.data.warning || 0, total: e.data.total || 0, findings: e.data.findings || [] }
         const sid = ifr && handoffScreenSids[ifr.getAttribute('data-frame-id')]
         setHandoffDrift((prev) => ({ ...prev, [sid || '_proto']: counts }))
       }
@@ -1117,6 +1119,12 @@ function AppInner() {
     const fid = Object.keys(handoffScreenSids).find((k) => handoffScreenSids[k] === sid)
     if (fid) panToFrame(fid)
   }, [handoffScreenSids, panToFrame])
+
+  // Clicking a component-variants entry pans the board to its detached frame.
+  const focusVariants = useCallback((cvid) => {
+    const fid = Object.keys(handoffVariantCvids).find((k) => handoffVariantCvids[k] === cvid)
+    if (fid) panToFrame(fid)
+  }, [handoffVariantCvids, panToFrame])
 
   // Fit ALL frames in the viewport (Cmd/Ctrl+0, or the Fit button). Reserves the
   // right side when the handoff panel is open so the board centers in the visible area.
@@ -1147,18 +1155,22 @@ function AppInner() {
     e.target.value = ''
     if (files.length === 0) return
     try {
-      const { manifest, frames, artifacts } = await loadHandoffPackage(files)
+      const { manifest, frames, artifacts, variantFlags } = await loadHandoffPackage(files)
       let protoId = null
       const screenSids = {}
+      const variantCvids = {}
       for (const f of frames) {
-        const id = placeNewFrame(f.place)            // prototype/screens first, then artifacts
+        const id = placeNewFrame(f.place)            // prototype/screens first, then artifacts + variants
         if (f.role === 'prototype') protoId = id
         if (f.role === 'screen' && f.meta?.sid) screenSids[id] = f.meta.sid  // frameId → sid
+        if (f.role === 'variants' && f.meta?.cvid) variantCvids[id] = f.meta.cvid  // frameId → cvid
       }
       setHandoffManifest(manifest)
       setHandoffProtoId(protoId)
       setHandoffArtifacts(artifacts || [])
       setHandoffScreenSids(screenSids)
+      setHandoffVariantCvids(variantCvids)
+      setHandoffVariantFlags(variantFlags || [])
       setHandoffActiveSid(null)
       setHandoffPanelOpen(true)
     } catch (err) {
@@ -1561,6 +1573,8 @@ function AppInner() {
           onFocusScreen={focusScreen}
           inspect={handoffInspect}
           liveDriftCounts={handoffDrift}
+          variantFlags={handoffVariantFlags}
+          onFocusVariants={focusVariants}
           onClearInspect={() => setHandoffInspect(null)}
           onClose={() => setHandoffPanelOpen(false)}
         />

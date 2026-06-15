@@ -71,7 +71,7 @@ const MIN_W = 320
 const MAX_W = 760
 const clampW = (w) => Math.max(MIN_W, Math.min(MAX_W, w))
 
-export function HandoffPanel({ manifest, prototypeFrameId, artifacts = [], activeSid = null, onSelectSid, onFocusScreen, inspect = null, liveDriftCounts = {}, onClearInspect, onClose }) {
+export function HandoffPanel({ manifest, prototypeFrameId, artifacts = [], activeSid = null, onSelectSid, onFocusScreen, inspect = null, liveDriftCounts = {}, variantFlags = [], onFocusVariants, onClearInspect, onClose }) {
   const followMode = !!prototypeFrameId
   const [tab, setTab] = useState('spec')
   const [width, setWidth] = useState(420)
@@ -97,9 +97,15 @@ export function HandoffPanel({ manifest, prototypeFrameId, artifacts = [], activ
     if (!b) { b = { name: g, items: [] }; groups.push(b) }
     b.items.push(a)
   }
+  // Component-variants: the detached "all variants of one component" frames, plus
+  // any flagged components whose variants the prototype skips (no gallery yet).
+  const variants = manifest.componentVariants || []
+  const nFlags = variantFlags.length
+  const hasVariants = variants.length + nFlags > 0
   const tabs = [
     ...(inspect ? [{ id: 'element', title: 'Element' }] : []),
     { id: 'spec', title: followMode ? 'Spec' : 'Screens' },
+    ...(hasVariants ? [{ id: 'variants', title: nFlags ? `Variants ⚠${nFlags}` : 'Variants' }] : []),
     ...groups.map((g) => ({ id: g.name, title: g.name })),
   ]
   const group = groups.find((g) => g.name === tab)
@@ -138,18 +144,83 @@ export function HandoffPanel({ manifest, prototypeFrameId, artifacts = [], activ
       )}
 
       {tab === 'element' && inspect ? (
-        <div style={S.body}><ElementInspect info={inspect} designSystem={manifest.designSystem} onClear={onClearInspect} /></div>
+        <div style={S.body}><ElementInspect info={inspect} designSystem={manifest.designSystem} variants={variants} onFocusVariants={onFocusVariants} onClear={onClearInspect} /></div>
       ) : tab === 'spec' ? (
         <div style={S.body}>
           {followMode
             ? <FollowSpec manifest={manifest} prototypeFrameId={prototypeFrameId} liveDriftCounts={liveDriftCounts} />
             : <ListSpec manifest={manifest} activeSid={activeSid} onSelectSid={onSelectSid} onFocusScreen={onFocusScreen} liveDriftCounts={liveDriftCounts} />}
         </div>
+      ) : tab === 'variants' ? (
+        <VariantsTab variants={variants} flags={variantFlags} onFocusVariants={onFocusVariants} />
       ) : group ? (
         <GroupTab docs={group.items} />
       ) : null}
       </div>
     </>
+  )
+}
+
+/** Variants tab — the board-level index of the detached component-variants frames,
+ *  plus the missing-gallery flags (components whose variants the prototype skips).
+ *  Clicking a frame entry pans the canvas to it; flags route to the designer. */
+function VariantsTab({ variants, flags, onFocusVariants }) {
+  const fidStyle = (f) =>
+    f === 'verified' ? S.present : f === 'missing' ? S.missing : S.id // inferred/markdown → neutral
+  return (
+    <div style={S.body}>
+      <p style={{ fontSize: 12, color: '#bdbdbd', margin: '2px 0 10px' }}>
+        Every variant a component must support — the detached “take it to the side and show all states” board a developer expects from Figma.
+      </p>
+
+      {flags.length > 0 && (
+        <section style={{ marginBottom: 18 }}>
+          <h4 style={{ fontSize: 12, color: '#f0c060', margin: '0 0 6px' }}>⚠ Missing variant galleries</h4>
+          {flags.map((fl) => (
+            <div key={fl.cvid || fl.component} style={{ ...S.driftRow, borderColor: '#f0c060' }}>
+              <div style={{ fontWeight: 600, color: '#f0c060' }}>{fl.component || fl.selector}</div>
+              {fl.selector && <code style={{ fontSize: 11, color: '#9a9a9a' }}>{fl.selector}</code>}
+              <div style={{ marginTop: 4, color: '#d8d8d8' }}>{fl.reason}</div>
+              <div style={{ marginTop: 4, fontSize: 11, color: '#9a9a9a' }}>→ designer to author a gallery state.</div>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {variants.map((cv) => (
+        <section key={cv.cvid || cv.component} style={{ marginBottom: 18 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+            <h4 style={{ fontSize: 13, color: '#fff', margin: 0, flex: 1 }}>{cv.component || cv.title}</h4>
+            <span style={{ ...S.pill, ...fidStyle(cv.fidelity) }}>{cv.fidelity || 'verified'}</span>
+          </div>
+          {cv.selector && <code style={{ fontSize: 11, color: '#9a9a9a' }}>{cv.selector}</code>}
+          {Array.isArray(cv.variants) && cv.variants.length > 0 && (
+            <ul style={{ margin: '6px 0 8px', paddingLeft: 16, fontSize: 12, color: '#d8d8d8' }}>
+              {cv.variants.map((v, i) => (
+                <li key={i} style={{ marginBottom: 3 }}>
+                  <strong style={{ color: '#eaeaea' }}>{v.name}</strong>
+                  {v.trigger ? ` — ${v.trigger}` : ''}{v.shows ? ` · shows ${v.shows}` : ''}
+                </li>
+              ))}
+            </ul>
+          )}
+          {/* finding 1 — catalog gap: variants the DS offers that the prototype/doc didn't cover (advisory) */}
+          {arr(cv.catalogGap) && (
+            <div style={{ ...S.driftRow, borderLeftColor: '#f0c060', marginTop: 6 }}>
+              <span style={{ color: '#f0c060', fontWeight: 600 }}>DS offers {cv.catalogGap.length} more</span>
+              <div style={{ color: '#c8c8c8', marginTop: 3 }}>
+                not in the documented variants: {cv.catalogGap.join(', ')} — confirm whether the prototype must support them
+              </div>
+            </div>
+          )}
+          {onFocusVariants && cv.fidelity !== 'missing' && (
+            <span onClick={() => onFocusVariants(cv.cvid)} style={{ ...S.tab, ...S.tabOn, display: 'inline-block' }}>
+              Focus frame →
+            </span>
+          )}
+        </section>
+      ))}
+    </div>
   )
 }
 
@@ -334,6 +405,19 @@ function ScreenSpec({ screen, route, components, live }) {
           {liveN > 0 ? `◉ ${liveN} live drift` : `◉ clean · ${live.total} DS`}
         </span>
       )}
+      {/* finding 6 (live-DOM): per-rule composition drift from the rendered prototype */}
+      {arr(live?.findings) && (
+        <div style={{ marginTop: 8 }}>
+          <div style={S.sec}>Live composition drift</div>
+          {live.findings.slice(0, 12).map((f, i) => (
+            <div key={i} style={{ ...S.driftRow, borderLeftColor: sevColor(f.severity), marginTop: 4 }}>
+              <span style={{ color: sevColor(f.severity), fontWeight: 600 }}>{f.ruleId}</span>
+              <code style={{ fontSize: 11, color: '#9a9a9a', marginLeft: 6 }}>{f.selector}</code>
+              <div style={{ color: '#c8c8c8', marginTop: 2 }}>{f.message}</div>
+            </div>
+          ))}
+        </div>
+      )}
       {refs.codeEntry && (<><div style={S.sec}>Code entry</div><div style={S.code}>{refs.codeEntry}</div></>)}
       {arr(refs.brIds) && (<><div style={S.sec}>Business rules</div>{refs.brIds.map((b) => <span key={b} style={{ ...S.chip, ...S.id }}>{b}</span>)}</>)}
       {arr(refs.gIds) && (<><div style={S.sec}>Open interview gaps</div>{refs.gIds.map((g) => <span key={g} style={{ ...S.chip, ...S.id }}>{g}</span>)}</>)}
@@ -361,6 +445,37 @@ function ComponentCard({ c }) {
           {ds.props && <div style={S.code}>{ds.props}</div>}
           {ds.import && <CopyBlock label="Import" code={ds.import} />}
           {ds.notes && <div style={{ ...S.code, color: '#8a8a92', marginTop: 6 }}>{ds.notes}</div>}
+          {/* finding 7 — variant restrictions: one DS concept → different code per variant.
+              The prototype's rendered variant picks the branch; we never imply one import. */}
+          {ds.byVariant && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 11, color: '#8a8a92', marginBottom: 4 }}>
+                Variant-restricted{ds.variantProperty ? ` on “${ds.variantProperty}”` : ''} — the prototype’s variant selects the import:
+              </div>
+              {Object.entries(ds.byVariant).map(([val, b]) => (
+                <div key={val} style={{ ...S.code, marginTop: 3 }}>
+                  <strong style={{ color: '#aebfff' }}>{val}</strong> → {b.component}
+                </div>
+              ))}
+            </div>
+          )}
+          {/* finding 1 — DS catalog (figma-set): what the DS OFFERS. Layers under the prototype. */}
+          {ds.dsCatalog && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 11, color: '#8a8a92', marginBottom: 4 }}>
+                DS catalog <span style={{ ...S.chip, ...S.id }}>figma-set</span>
+              </div>
+              {Object.entries(ds.dsCatalog.variants).map(([prop, opts]) => (
+                <div key={prop} style={{ ...S.code, marginTop: 3 }}>{prop}: {opts.join(' · ')}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {/* finding 2 — per-component usage guidance ("Add instructions for MCP") */}
+      {c.mcpNotes && (
+        <div style={{ ...S.code, color: '#c8c8c8', marginTop: 6, borderLeft: '2px solid #5566aa', paddingLeft: 6 }}>
+          📝 {c.mcpNotes}
         </div>
       )}
       {arr(c.statesPresent) && c.statesPresent.map((s) => <span key={s} style={{ ...S.chip, ...S.present }}>{s}</span>)}
@@ -484,6 +599,23 @@ function DsBlock({ ds, designSystem }) {
           </div>
         )}
         {reg.props && <div style={{ ...S.code, marginTop: 4 }}>props: {reg.props}</div>}
+        {/* finding 7 — variant restrictions on the live element path */}
+        {ds.byVariant && (
+          <div style={{ marginTop: 8, fontSize: 12 }}>
+            <div style={{ color: '#8a8a92', marginBottom: 4 }}>
+              Variant-restricted{ds.variantProperty ? ` · ${ds.variantProperty}` : ''}:
+            </div>
+            {Object.entries(ds.byVariant).map(([val, b]) => (
+              <div key={val} style={S.code}><strong style={{ color: '#aebfff' }}>{val}</strong> → {b.component}</div>
+            ))}
+          </div>
+        )}
+        {/* finding 1 — DS catalog option set for this element */}
+        {ds.dsCatalog && Object.entries(ds.dsCatalog.variants).map(([prop, opts]) => (
+          <div key={prop} style={{ ...S.code, marginTop: 4 }}>
+            <span style={{ color: '#8a8a92' }}>catalog ({prop}):</span> {opts.join(' · ')}
+          </div>
+        ))}
         {reg.figmaUrl && (
           <a href={reg.figmaUrl} target="_blank" rel="noreferrer"
             style={{ display: 'inline-block', marginTop: 8, fontSize: 12, color: '#aebfff', textDecoration: 'none' }}>
@@ -498,7 +630,37 @@ function DsBlock({ ds, designSystem }) {
 
 /** Chrome-style live element inspect: real computed styles, copyable like Figma,
  *  PLUS the real design-system component name (read from data-ds-component in source). */
-function ElementInspect({ info, designSystem, onClear }) {
+/**
+ * Match an Alt-clicked element to a componentVariants entry by its CSS selector
+ * (tag + classes) or its DS-component tag. Returns the cv or null. Only a POSITIVE
+ * match renders the jump link, so an unverified selector degrades to no-link
+ * (never a dead link, L-35) — it lights up once the real prototype's element
+ * carries the documented class / data-ds-component.
+ */
+function matchVariant(info, variants) {
+  if (!info || !variants || !variants.length) return null
+  const classes = new Set((info.classes || '').split(/\s+/).filter(Boolean))
+  const dsName = info.ds && info.ds.component
+  for (const cv of variants) {
+    // 1) DS-component tag match (exact, strongest) — cv.dsComponent if authored.
+    if (dsName && cv.dsComponent && cv.dsComponent === dsName) return cv
+    // 2) CSS selector match: tag + every class present. Comma list → any clause.
+    if (!cv.selector) continue
+    for (const clause of cv.selector.split(',').map((s) => s.trim()).filter(Boolean)) {
+      const tagM = clause.match(/^[a-z][\w-]*/i)
+      const tag = tagM ? tagM[0].toLowerCase() : null
+      const cls = (clause.match(/\.[-\w]+/g) || []).map((c) => c.slice(1))
+      if (tag && info.tag && tag !== info.tag.toLowerCase()) continue
+      if (cls.length && !cls.every((c) => classes.has(c))) continue
+      if (!tag && !cls.length) continue
+      return cv
+    }
+  }
+  return null
+}
+
+function ElementInspect({ info, designSystem, variants = [], onFocusVariants, onClear }) {
+  const cv = matchVariant(info, variants)
   return (
     <>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -506,6 +668,23 @@ function ElementInspect({ info, designSystem, onClear }) {
         {onClear && <button onClick={onClear} style={S.x} title="Clear selection">×</button>}
       </div>
       {info.ds && <DsBlock ds={info.ds} designSystem={designSystem} />}
+      {cv && (
+        <div style={{ ...S.dsBox, marginTop: 8 }}>
+          <div style={S.dsName}>Variants · {cv.component}</div>
+          <div style={{ fontSize: 12, color: '#cfcfcf', marginBottom: cv.fidelity === 'missing' ? 0 : 6 }}>
+            {Array.isArray(cv.variants) && cv.variants.length
+              ? `${cv.variants.length} variant${cv.variants.length > 1 ? 's' : ''} this component must support.`
+              : 'This component has documented variants.'}
+          </div>
+          {cv.fidelity === 'missing'
+            ? <div style={{ fontSize: 12, color: '#f0c060' }}>⚠ No gallery built yet — designer to author.</div>
+            : (onFocusVariants && (
+                <span onClick={() => onFocusVariants(cv.cvid)} style={{ ...S.tab, ...S.tabOn, display: 'inline-block' }}>
+                  Show all variants →
+                </span>
+              ))}
+        </div>
+      )}
       <LiveDrift findings={liveDrift(info, designSystem)} />
       <LayoutTokens info={info} designSystem={designSystem} />
       {info.classes && <div style={S.code}>.{info.classes.split(/\s+/).filter(Boolean).join(' .')}</div>}
